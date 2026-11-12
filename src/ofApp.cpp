@@ -141,7 +141,6 @@ void ofApp::setParameters() {
 
 void ofApp::loadShaders() {
 	fragShader.load("shadersGL3/shader");
-	fragShader.linkProgram();
 	trailMapComputeShader.setupShaderFromFile(GL_COMPUTE_SHADER, "shadersGL3/trailMapShader.compute");
 	trailMapComputeShader.linkProgram();
 	particleComputeShader.setupShaderFromFile(GL_COMPUTE_SHADER, "shadersGL3/particleShader.compute");
@@ -160,8 +159,7 @@ void ofApp::setupGui() {
 	gui.add(maxTrailDensitySlider.setup("Max Trail Density", 7.5, 0, 50));
 	gui.add(densitySpeedSlider.setup("Density Speed", 1, 0.01, 2));
 	gui.add(sensorSizeSlider.setup("Sensor Size", 1, 0, 4));
-	gui.add(speedAffectedByTrailDensityToggle.setup("speedAffectedByTrailDensity"));
-	speedAffectedByTrailDensityToggle = false;
+	gui.add(speedAffectedByTrailDensityToggle.setup("speedAffectedByTrailDensity", false));
 
 	// Setup color sliders
 	ofParameter<ofColor> param;
