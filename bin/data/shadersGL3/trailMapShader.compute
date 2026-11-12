@@ -48,10 +48,9 @@ void main() {
                 neighbors += 1.0;
             }
         }
-        // Scent and route reinforcement are independent quantities. A dense
-        // scout cloud is not automatically an established connection.
+        // Routes are continuous traffic reinforcement, subject to the same
+        // ordinary decay as scent. Unused branches can be abandoned freely.
         vec4 decay = vec4(evaporation);
-        if (old >= routeThreshold) decay.w *= 0.25;
         values[team] = min(vec4(MAX_SCENT, MAX_SCENT, MAX_SCENT, MAX_TRAIL),
                            mix(oldTrails[field + team], sum / neighbors, diffusion) * (vec4(1.0) - decay) +
                            vec4(contributions[field + team]) * 0.035);

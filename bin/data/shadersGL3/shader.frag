@@ -43,6 +43,12 @@ void main() {
         vec3 tint = mix(vec3(0.16), fogColor / max(fogTotal, 0.0001), 0.7);
         color = mix(color, tint, opacity);
     }
+    if (showRoutes) {
+        // Show developing branches too; crossing the threshold only changes
+        // the emphasis and combat cost, rather than creating a route object.
+        float opacity = 0.6 * clamp(strongestRoute / routeThreshold, 0.0, 1.0);
+        color = mix(color, teamColors[owner].rgb * 0.65, opacity);
+    }
     if (showRoutes && strongestRoute >= routeThreshold) {
         // Solid team-colored routes have a crisp dark border; they never turn
         // into white blobs that can be confused with the agent sprites.

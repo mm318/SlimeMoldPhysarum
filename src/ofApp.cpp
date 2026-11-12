@@ -13,7 +13,7 @@ void ofApp::setup() {
     controls.setName("Colony simulation");
     controls.add(paused.set("Paused [Space]", false));
     controls.add(showPheromones.set("Show pheromones", true));
-    controls.add(showRoutes.set("Show established routes", true));
+    controls.add(showRoutes.set("Show traffic trails", true));
     controls.add(showAgents.set("Show agents", true));
     controls.add(turnsPerFrame.set("Turns per frame", 1, 1, 8));
     controls.add(budget.set("Team energy per turn", 768, 0, 6144));
@@ -24,12 +24,12 @@ void ofApp::setup() {
     controls.add(scentAttraction.set("Other colony scent", 1.4f, 0.0f, 5.0f));
     controls.add(freshSpace.set("Explore fresh space", 0.8f, 0.0f, 3.0f));
     controls.add(sensorDistance.set("Local sensor distance", 3.0f, 1.0f, 10.0f));
-    controls.add(trailFollowing.set("Follow discovered route", 0.8f, 0.0f, 2.0f));
+    controls.add(trailFollowing.set("Follow traffic trails", 0.8f, 0.0f, 2.0f));
     controls.add(avoidance.set("Avoid enemy routes", 0.65f, 0.0f, 2.0f));
     controls.add(exploration.set("Exploration turning", 0.45f, 0.0f, 1.0f));
     controls.add(diffusion.set("Pheromone diffusion", 0.12f, 0.0f, 0.5f));
     controls.add(evaporation.set("Pheromone evaporation", 0.006f, 0.0f, 0.05f));
-    controls.add(routeThreshold.set("Established density", 6.0f, 1.0f, 24.0f));
+    controls.add(routeThreshold.set("Strong trail density", 3.0f, 0.5f, 24.0f));
     controls.add(attackPower.set("Attack power", 6.0f, 0.1f, 30.0f));
     controls.add(defense.set("Route defense", 1.5f, 0.1f, 6.0f));
     gui.setup(controls, "colony-settings.xml");
@@ -113,9 +113,9 @@ void ofApp::draw() {
          << "Turn " << simulation.getTurn() << " / " << std::fixed << std::setprecision(0) << ofGetFrameRate() << " fps\n\n"
          << "Local pheromones only\n"
          << "Mist: pheromones\n"
-         << "Solid color: established route\n"
-         << "White dots: agents\n"
-         << "Amber diamonds: attacking\n"
+         << "Colored paths: traffic trails\n"
+         << "Bright paths: strong routes\n"
+         << "Colored dots: all agents\n"
          << "Rings: fixed sites\n\n"
          << "Latest sampled turn:\n"
          << "Energy: " << used << " / " << budget * 25 << "\n"

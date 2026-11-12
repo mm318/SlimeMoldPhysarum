@@ -62,9 +62,9 @@ float directionScore(Agent agent, vec2 direction, float offset) {
         foreignRoute = max(foreignRoute, enemy.w);
     }
     float crossingPenalty = foreignRoute >= routeThreshold ? 1.0 : (foreignScent >= 0.05 ? 0.25 : 0.0);
-    // Scouts prefer fresh space; experienced couriers can follow routes that
-    // were reinforced after an actual visit to another colony.
-    float routeScore = agent.state.y > 0.0 ? sampleField.w / (1.0 + sampleField.w) : 0.0;
+    // All agents respond to local traffic trails, including temporary branches
+    // and junctions that haven't reached another site.
+    float routeScore = sampleField.w / (1.0 + sampleField.w);
     return 3.0 * scentAttraction * scentGradient - freshSpace * ownGradient +
            trailFollowing * routeScore - avoidance * crossingPenalty + 0.08 * cos(offset);
 }
@@ -137,17 +137,21 @@ void main() {
     } else {
         if (action == 0) atomicAdd(stats[team].exploring, 1u);
         else atomicAdd(stats[team].encroaching, 1u);
-        agent.position.w += distance(nextPosition, agent.position.xy);
+        float traveled = distance(nextPosition, agent.position.xy);
+        agent.position.w += traveled;
         agent.position.xy = nextPosition;
         agent.position.z = heading;
+        // Ordinary traffic is enough to build a trail. There is no site-visit
+        // prerequisite, and fighting in place does not maintain a route.
+        if (traveled > 0.0001) {
+            atomicAdd(contributions[cellAt(nextPosition) * TEAM_COUNT + int(team)].w, 4u);
+        }
         // Coordinates are consulted only for physical contact with a site,
         // never to choose a heading or infer a distant site's direction.
         for (uint colony = 0u; colony < 3u; ++colony) {
             uint visited = team * 3u + colony;
             if (visited == agent.identity.y || sites[visited].z == 0.0) continue;
             if (distance(nextPosition, sites[visited].xy) > 2.0) continue;
-            float directDistance = distance(sites[agent.identity.y].xy, sites[visited].xy);
-            agent.state.x = clamp(directDistance / max(agent.position.w, directDistance), 0.15, 1.0);
             agent.state.y += 1.0;
             agent.position.w = 0.0;
             agent.identity.z = agent.identity.y;
@@ -161,9 +165,5 @@ void main() {
     }
     int depositField = cellAt(agent.position.xy) * TEAM_COUNT + int(team);
     atomicAdd(contributions[depositField][int(agent.identity.y % 3u)], 2u);
-    if (agent.state.y > 0.0) {
-        uint deposit = uint(2.0 + 6.0 * agent.state.x);
-        atomicAdd(contributions[depositField].w, deposit);
-    }
     agents[index] = agent;
 }

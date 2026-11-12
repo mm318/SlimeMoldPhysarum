@@ -13,7 +13,7 @@ public:
     struct Agent {
         glm::vec4 position; // x, y, heading (radians), trip distance
         glm::uvec4 identity; // team, last visited site, previously visited site, seed
-        glm::vec4 state; // last trip efficiency, completed trips, last action, unused
+        glm::vec4 state; // reserved, site visits, last action, unused
     };
 
     struct TeamStats {
@@ -41,7 +41,7 @@ public:
         float exploration = 0.45f;
         float diffusion = 0.12f;
         float evaporation = 0.006f;
-        float routeThreshold = 6.0f;
+        float routeThreshold = 3.0f;
         float attackPower = 6.0f;
         float defense = 1.5f;
     };
@@ -54,7 +54,7 @@ public:
 
     std::array<TeamStats, teamCount> readStats();
     std::vector<Agent> readAgents();
-    // xyz: locally diffusing scent from each colony; w: established route.
+    // xyz: locally diffusing scent from each colony; w: traffic reinforcement.
     std::vector<glm::vec4> readTrails();
     // Also used by integration tests to construct controlled encounters.
     void uploadAgents(const std::vector<Agent>& agents);

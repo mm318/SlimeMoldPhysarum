@@ -7,13 +7,11 @@ uniform vec2 drawSize;
 uniform vec4 teamColors[TEAM_COUNT];
 in vec4 position;
 out vec4 agentColor;
-flat out int activity;
 void main() {
     Agent agent = agents[gl_VertexID];
     vec2 screenPosition = agent.position.xy / vec2(gridSize) * drawSize + position.xy;
     gl_Position = modelViewProjectionMatrix * vec4(screenPosition, 0.0, 1.0);
-    activity = int(agent.state.z);
-    vec3 color = activity == 3 ? vec3(1.0, 0.59, 0.12) :
-                 mix(vec3(1.0), teamColors[agent.identity.x].rgb, 0.08);
+    int activity = int(agent.state.z);
+    vec3 color = mix(teamColors[agent.identity.x].rgb, vec3(1.0), 0.2);
     agentColor = vec4(color, activity == 0 ? 0.45 : 1.0);
 }

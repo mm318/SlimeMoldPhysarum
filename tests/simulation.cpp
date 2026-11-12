@@ -71,7 +71,10 @@ void checkBudgetAndFields(Simulation& simulation) {
         require(stats.spent == 20 && stats.exploring == 10, "Team pool must fund a subset of agents");
         require(stats.encroaching == 0 && stats.attacking == 0, "Empty field should only cost exploration energy");
     }
-    for (auto field : simulation.readTrails()) require(field.w == 0, "Scouts must not establish routes before discovering another site");
+    bool traffic = false;
+    for (auto field : simulation.readTrails()) traffic |= field.w > 0;
+    require(traffic, "Ordinary scouting movement must reinforce trails before any site connection");
+    for (const auto& agent : simulation.readAgents()) require(agent.state.y == 0, "This trail fixture must not depend on site visits");
 
     for (std::size_t i = 0; i < trails.size(); i += 25) trails[i].x = 1.0f;
     simulation.uploadTrails(trails);
@@ -182,6 +185,46 @@ void checkLocality() {
     }
 }
 
+void checkTemporaryRoutes(Simulation& simulation) {
+    simulation.reset(123456);
+    auto sites = simulation.getSites();
+    for (unsigned team = 0; team < 25; ++team) {
+        sites[team * 3] = glm::vec4(6, 6, 1, 0);
+        sites[team * 3 + 1] = glm::vec4(58, 6, 1, 0);
+        sites[team * 3 + 2] = glm::vec4(58, 42, 1, 0);
+    }
+    simulation.uploadSites(sites);
+    auto agents = simulation.readAgents();
+    for (auto& agent : agents) agent.position = glm::vec4(30.2f, 24.2f, 0, 0);
+    simulation.uploadAgents(agents);
+    Simulation::Parameters p;
+    p.budget = Simulation::agentsPerTeam * p.encroachCost;
+    p.diffusion = p.evaporation = p.exploration = 0;
+    p.scentAttraction = p.freshSpace = p.trailFollowing = p.avoidance = 0;
+    simulation.step(p);
+    auto fields = simulation.readTrails();
+    const auto stats = simulation.readStats();
+    for (unsigned team = 0; team < 25; ++team) {
+        require(stats[team].arrivals == 0, "Intermediate-node fixture must not visit a site");
+        require(fields[simulation.fieldIndex(30, 24, team)].w >= p.routeThreshold,
+                "Traffic must establish a route at an intermediate node with all sites unvisited");
+    }
+
+    // Withdraw traffic: the former route gets no protected lifetime or special
+    // ownership status, and dissolves without an enemy having to remove it.
+    std::fill(fields.begin(), fields.end(), glm::vec4(0));
+    fields[simulation.fieldIndex(30, 24, 0)] = glm::vec4(6, 0, 0, 6);
+    simulation.uploadTrails(fields);
+    p.budget = 0;
+    p.evaporation = 0.2f;
+    simulation.step(p);
+    auto decaying = simulation.readTrails()[simulation.fieldIndex(30, 24, 0)];
+    require(std::abs(decaying.x - decaying.w) < 0.0001f, "Routes must decay at the ordinary scent rate");
+    for (int turn = 0; turn < 5; ++turn) simulation.step(p);
+    require(simulation.readTrails()[simulation.fieldIndex(30, 24, 0)].w < p.routeThreshold,
+            "An abandoned route must disappear without combat or endpoint approval");
+}
+
 void checkExploration() {
     Simulation simulation;
     simulation.setup(160, 120, 24680);
@@ -214,7 +257,7 @@ void checkLocalConnections(Simulation& simulation) {
     for (unsigned team = 0; team < 25; ++team) {
         sites[team * 3] = glm::vec4(12, 24, 1, 0);
         sites[team * 3 + 1] = glm::vec4(50, 24, 1, 0);
-        sites[team * 3 + 2] = glm::vec4(0);
+        sites[team * 3 + 2] = glm::vec4(32, 44, 1, 0);
     }
     simulation.uploadSites(sites);
     auto agents = simulation.readAgents();
@@ -244,18 +287,19 @@ void checkLocalConnections(Simulation& simulation) {
     p.trailFollowing = p.exploration = p.avoidance = 0;
     p.routeThreshold = 1000;
     for (int i = 0; i < 150; ++i) simulation.step(p);
-    bool visited[25][2] = {};
+    bool visited[25][3] = {};
     for (const auto& agent : simulation.readAgents()) {
         if (agent.state.y > 0) visited[agent.identity.x][agent.identity.y % 3] = true;
     }
     const auto fields = simulation.readTrails();
     for (unsigned team = 0; team < 25; ++team) {
         require(visited[team][0] && visited[team][1], "Local scent should guide visits to both connected sites");
+        require(!visited[team][2], "The third site must remain unvisited in this partial-network fixture");
         bool reinforced = false;
         for (int x = 20; x < 42; ++x) {
-            reinforced |= fields[simulation.fieldIndex(x, 24, team)].w >= 6;
+            reinforced |= fields[simulation.fieldIndex(x, 24, team)].w >= Simulation::Parameters().routeThreshold;
         }
-        require(reinforced, "Successful discovery must reinforce a route, separately from scent");
+        require(reinforced, "A connection between two sites must form a route while the third remains unvisited");
     }
 }
 
@@ -265,16 +309,17 @@ void checkRendering(Simulation& simulation) {
     simulation.uploadTrails(fields);
     ofFbo target;
     target.allocate(64, 48, GL_RGBA);
-    auto render = [&](bool scent, bool route) {
+    auto frame = [&](bool scent, bool route, bool agents = false) {
         target.begin();
         ofClear(0, 255);
         ofSetupScreenOrtho(64, 48);
-        simulation.draw(64, 48, 6, false, scent, route);
+        simulation.draw(64, 48, 6, agents, scent, route);
         target.end();
         ofPixels pixels;
         target.readToPixels(pixels);
-        return pixels.getColor(32, 24);
+        return pixels;
     };
+    auto render = [&](bool scent, bool route) { return frame(scent, route).getColor(32, 24); };
     auto background = render(false, false);
     auto scent = render(true, false);
     auto route = render(false, true);
@@ -283,6 +328,27 @@ void checkRendering(Simulation& simulation) {
     for (auto& field : fields) field.w = 0;
     simulation.uploadTrails(fields);
     require(render(false, true) == background, "Scent alone must not render as an established route");
+    for (auto& field : fields) field.w = 1;
+    simulation.uploadTrails(fields);
+    require(render(false, true).getBrightness() > background.getBrightness(), "Developing trails should be visible below the strong-route threshold");
+
+    auto agents = simulation.readAgents();
+    for (auto& agent : agents) agent.position = glm::vec4(-100, -100, 0, 0);
+    agents[0].position = glm::vec4(32.5f, 24.5f, 0, 0);
+    agents[0].state.z = 1;
+    simulation.uploadAgents(agents);
+    auto exploring = frame(false, false, true);
+    agents[0].state.z = 3;
+    simulation.uploadAgents(agents);
+    auto attacking = frame(false, false, true);
+    require(std::memcmp(exploring.getData(), attacking.getData(), exploring.size()) == 0,
+            "Attackers and other active agents must use the same appearance");
+    bool colored = false;
+    for (int y = 0; y < 48; ++y) for (int x = 0; x < 64; ++x) {
+        auto color = exploring.getColor(x, y);
+        colored |= color.r > color.g + 60 && color.r > color.b + 60;
+    }
+    require(colored, "Agents must display their team's color rather than white");
 }
 
 }
@@ -306,6 +372,8 @@ int main() {
         std::cout << "PASS pooled budgets, zero energy, terrain costs, 25 independent fields\n";
         checkCombat(simulation);
         std::cout << "PASS contested combat, attacker losses, route erasure\n";
+        checkTemporaryRoutes(simulation);
+        std::cout << "PASS intermediate-node routes, ordinary decay, voluntary abandonment\n";
         checkLocality();
         std::cout << "PASS no steering information from distant site coordinates\n";
         checkExploration();

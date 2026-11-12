@@ -16,19 +16,28 @@ explore. It diffuses and evaporates. Agents prefer fresh space and respond to
 locally sampled scent from their team's other colonies. Discovery depends on
 exploration and overlapping scent trails; it takes longer than direct homing.
 
-A separate route-strength field is reinforced after an agent physically reaches
-another site. Dense scout pheromone alone cannot establish a route. At contact,
-agents reverse their travel direction and follow the previous colony's local
-scent. Efficient completed trips reinforce routes more strongly, while unused
-connections fade. The network emerges from discovery and repeated travel.
+Routes emerge from continuous traffic reinforcement. Every successful movement
+deposits trail pheromone, and every agent can follow those trails, regardless of
+whether it has visited another site. Repeated traffic strengthens a path;
+diffusion and evaporation weaken it when agents move elsewhere. Partial
+connections, temporary branches, and junctions between intermediate locations
+can all form routes. Connecting two of three sites is sufficient to maintain
+that connection while the remaining site is still undiscovered.
+
+Trail reinforcement has the same evaporation rate as colony scent. Routes can
+be abandoned and fade without enemy attacks. **Strong trail density** (default
+3) controls the bright route rendering and the higher cost of attacking a busy
+enemy trail. Developing trails remain visible below that threshold. At contact
+with another site, agents reverse their travel direction and respond to the
+previous colony's local scent; site visits do not certify or protect a route.
 
 | Appearance | Meaning |
 | --- | --- |
 | Faint colored mist | Locally diffusing colony pheromone |
-| Solid team color with a dark edge | Established route |
-| Bright white dots with dark outlines | Moving agents |
-| Dim white dots | Agents waiting for energy |
-| Amber diamonds | Attacking agents |
+| Colored paths that brighten with traffic | Developing trails |
+| Solid team color with a dark edge | Strongly reinforced route |
+| Team-colored dots with dark outlines | All active agents, including attackers |
+| Dim team-colored dots | Agents waiting for energy |
 | Labeled colored rings | Permanent sites, e.g. `12A`, `12B` |
 
 The sidebar has independent visibility switches for pheromones, routes, and
@@ -36,6 +45,7 @@ agents. **Other colony scent** controls the response to nearby scent gradients;
 **Explore fresh space** encourages leaving already explored areas, and
 **Exploration turning** controls random wandering. **Local sensor distance**
 sets how far ahead agents sample. These controls replace direct site attraction.
+**Follow traffic trails** sets the local attraction to reinforced paths.
 
 Every simulation turn refreshes a shared energy pool for each team. The default
 budget is 768, and action costs are:
@@ -51,7 +61,7 @@ their next action wait; they do not die. Allocation order rotates each turn.
 Unused energy expires at the end of the turn. Controls preserve the ordering
 `exploration < foreign pheromone < attack`.
 
-An established route has route strength above the adjustable density threshold.
+An established route is a trail above the adjustable traffic-density threshold.
 Attackers wait at its border and spend energy to attack the next segment. A
 contest resolves simultaneous attacks on each targeted route segment: attacking
 effort competes against route strength and current reinforcement. Either side
@@ -114,7 +124,8 @@ Wayland session), matching openFrameworks 0.12.1's Linux window backend.
 The default build includes GPU integration checks for colony initialization,
 reproducible resets, independent team fields, pooled energy limits, terrain
 costs, combat outcomes, route erasure, exploration, independence from distant
-site positions, local scent-guided connections, and separate rendering layers:
+site positions, partial networks, intermediate-node routes, ordinary route decay,
+voluntary abandonment, local scent-guided connections, and separate rendering layers:
 
 ```bash
 ctest --test-dir build --output-on-failure
