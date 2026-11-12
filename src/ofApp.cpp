@@ -1,267 +1,145 @@
 #include "ofApp.h"
 
-//--------------------------------------------------------------
-void ofApp::setup(){
-	ofDisableArbTex();
-	ofSeedRandom();
+#include <algorithm>
+#include <iomanip>
+#include <sstream>
 
-	width = ofGetWidth() - guiWidth;
-	height = ofGetHeight();
-
-	setupGui();
-
-	// Load and link shaders
-	loadShaders();
-
-	ofBackground(0);
-	ofEnableBlendMode(OF_BLENDMODE_ADD);
-
-	// Initialize and allocate buffers
-	trailMapSize.resize(width * height);
-	for (int i = 0; i < trailMapSize.size(); i++) {
-		auto & c = trailMapSize[i];
-		c.val.r = 0;
-		c.val.g = 0;
-		c.val.b = 0;
-		c.val.a = 0;
-	}
-	doubleBufferedTrailMap.allocate(trailMapSize);
-	particleSize.resize(1000000);
-	int radius = 300;
-	ofVec2f centerPoint = ofVec2f(width / 2, height / 2);
-	for (auto& p : particleSize) {
-		int team = (int) ofRandom(0, numTeams);
-
-		float distance = ofRandom(0, radius);
-		float angle = ofRandom(0, 359);
-		ofVec2f dir = ofVec2f(cos(angle), sin(angle));
-		ofVec2f point = centerPoint + dir * distance;
-
-		p.pos.x = ofRandom(0, width - 1);// point.x;
-		p.pos.y = ofRandom(0, height - 1); //point.y;
-		p.pos.z = (180 + angle);
-
-		p.speciesMask.r = team == 0;
-		p.speciesMask.g = team == 1;
-		p.speciesMask.b = team == 2;
-		p.speciesMask.a = team > 2;
-	}
-	particleBuffer.allocate(particleSize, GL_DYNAMIC_DRAW);
-
-	// Bind buffers for use in shaders
-	particleBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 0);
-	doubleBufferedTrailMap.src->bindBase(GL_SHADER_STORAGE_BUFFER, 1);
-	doubleBufferedTrailMap.dst->bindBase(GL_SHADER_STORAGE_BUFFER, 2);
+void ofApp::setup() {
+    ofSetWindowTitle("Slime colonies: 25 teams");
+    ofSetFrameRate(60);
+    ofEnableAlphaBlending();
+    ofBackground(6, 8, 12);
+    ofxBaseGui::setDefaultWidth(guiWidth - 20);
+    controls.setName("Colony simulation");
+    controls.add(paused.set("Paused [Space]", false));
+    controls.add(showPheromones.set("Show pheromones", true));
+    controls.add(showRoutes.set("Show established routes", true));
+    controls.add(showAgents.set("Show agents", true));
+    controls.add(turnsPerFrame.set("Turns per frame", 1, 1, 8));
+    controls.add(budget.set("Team energy per turn", 768, 0, 6144));
+    controls.add(exploreCost.set("Explore cost", 1, 1, 8));
+    controls.add(encroachCost.set("Foreign scent cost", 3, 2, 24));
+    controls.add(attackCost.set("Attack cost", 12, 3, 64));
+    controls.add(speed.set("Speed", 0.65f, 0.1f, 1.5f));
+    controls.add(scentAttraction.set("Other colony scent", 1.4f, 0.0f, 5.0f));
+    controls.add(freshSpace.set("Explore fresh space", 0.8f, 0.0f, 3.0f));
+    controls.add(sensorDistance.set("Local sensor distance", 3.0f, 1.0f, 10.0f));
+    controls.add(trailFollowing.set("Follow discovered route", 0.8f, 0.0f, 2.0f));
+    controls.add(avoidance.set("Avoid enemy routes", 0.65f, 0.0f, 2.0f));
+    controls.add(exploration.set("Exploration turning", 0.45f, 0.0f, 1.0f));
+    controls.add(diffusion.set("Pheromone diffusion", 0.12f, 0.0f, 0.5f));
+    controls.add(evaporation.set("Pheromone evaporation", 0.006f, 0.0f, 0.05f));
+    controls.add(routeThreshold.set("Established density", 6.0f, 1.0f, 24.0f));
+    controls.add(attackPower.set("Attack power", 6.0f, 0.1f, 30.0f));
+    controls.add(defense.set("Route defense", 1.5f, 0.1f, 6.0f));
+    gui.setup(controls, "colony-settings.xml");
+    gui.setPosition(ofGetWidth() - guiWidth + 10, 10);
+    seed = static_cast<unsigned>(ofGetSystemTimeMicros());
+    simulation.setup(320, 256, seed);
 }
 
-//--------------------------------------------------------------
-void ofApp::update(){
-	ofSetWindowTitle(ofToString(ofGetFrameRate()));
-
-	setParameters();
-
-	// Rebind buffers since the pointers for these were swapped last frame
-	doubleBufferedTrailMap.swap();
-	doubleBufferedTrailMap.src->bindBase(GL_SHADER_STORAGE_BUFFER, 1);
-	doubleBufferedTrailMap.dst->bindBase(GL_SHADER_STORAGE_BUFFER, 2);
-
-	// Update particle location and modify trail map
-	particleComputeShader.begin();
-	particleComputeShader.setUniform1i("screenWidth", width);
-	particleComputeShader.setUniform1i("screenHeight", height);
-	particleComputeShader.setUniform1f("senseAngle", senseAngle);
-	particleComputeShader.setUniform1f("steerStrength", steerStrength);
-	particleComputeShader.setUniform1f("senseDistance", senseDistance);
-	particleComputeShader.setUniform1f("maxTrailDensity", maxTrailDensity);
-	particleComputeShader.setUniform1f("densitySpeed", densitySpeed);
-	particleComputeShader.setUniform1f("speed", speed);
-	particleComputeShader.setUniform1f("deltaTime", 1.0);
-	particleComputeShader.setUniform1i("sensorSize", sensorSize);
-	particleComputeShader.setUniform1i("speedAffectedByTrailDensity", speedAffectedByTrailDensity);
-	particleComputeShader.dispatchCompute((particleSize.size() + 1024 - 1) / 1024, 1, 1);
-	particleComputeShader.end();
-
-	// Perform diffusion and decay on trail map
-	trailMapComputeShader.begin();
-	trailMapComputeShader.setUniform1i("screenWidth", width);
-	trailMapComputeShader.setUniform1i("screenHeight", height);
-	trailMapComputeShader.setUniform1f("diffuseRate", diffuseRate);
-	trailMapComputeShader.setUniform1f("decayRate", decayRate);
-	trailMapComputeShader.dispatchCompute(height * width / 1000 , 1, 1);
-	trailMapComputeShader.end();
-
-	
+SlimeSimulation::Parameters ofApp::parameters() const {
+    SlimeSimulation::Parameters result;
+    result.budget = budget;
+    result.exploreCost = exploreCost;
+    result.encroachCost = encroachCost;
+    result.attackCost = attackCost;
+    result.speed = speed;
+    result.scentAttraction = scentAttraction;
+    result.freshSpace = freshSpace;
+    result.sensorDistance = sensorDistance;
+    result.trailFollowing = trailFollowing;
+    result.avoidance = avoidance;
+    result.exploration = exploration;
+    result.diffusion = diffusion;
+    result.evaporation = evaporation;
+    result.routeThreshold = routeThreshold;
+    result.attackPower = attackPower;
+    result.defense = defense;
+    return result;
 }
 
-//--------------------------------------------------------------
-void ofApp::draw(){
-	// Use fragment shader to draw a rectangle over the whole screen
-	// Color the pixels based on the data in the trail map buffer
-	// auto modifiedTrailBuffer = doubleBufferedTrailMap.dst->map<Cell>(GL_READ_WRITE);
-	fragShader.begin();
-	fragShader.setUniform1i("screenWidth", width);
-	fragShader.setUniform1i("screenHeight", height);
-	fragShader.setUniform1f("decay", decayRate);
-	fragShader.setUniform1f("maxTrailDensity", maxTrailDensity);
-	fragShader.setUniform1f("xRatio", float(ofGetWidth() - guiWidth) / float(width));
-	fragShader.setUniform1f("yRatio", float(ofGetHeight()) / float(height));
-	fragShader.setUniform4f("teamColor1", teamColor1);
-	fragShader.setUniform4f("teamColor2", teamColor2);
-	fragShader.setUniform4f("teamColor3", teamColor3);
-	fragShader.setUniform4f("teamColor4", teamColor4);
-	fragShader.setUniform4f("baseColor", baseColor);
-	ofDrawRectangle(0, 0, ofGetWidth() - guiWidth, ofGetHeight());
-	fragShader.end();
-	
-	gui.draw();
+void ofApp::update() {
+    // Preserve the requested cost ordering when sliders or saved settings change.
+    if (encroachCost <= exploreCost) encroachCost = exploreCost + 1;
+    if (attackCost <= encroachCost) attackCost = encroachCost + 1;
+    if (!paused || singleStep) {
+        int count = singleStep ? 1 : turnsPerFrame.get();
+        for (int i = 0; i < count; ++i) simulation.step(parameters());
+        singleStep = false;
+        if (ofGetFrameNum() % 10 == 0 || paused) stats = simulation.readStats();
+    }
 }
 
-void ofApp::setParameters() {
-	gui.setPosition(ofGetWidth() - guiWidth, 10);
-	steerStrength = steerSlider;
-	senseAngle = angleSlider;
-	senseDistance = senseDistanceSlider;
-	diffuseRate = diffuseRateSlider;
-	decayRate = decayRateSlider;
-	speed = speedSlider;
-	maxTrailDensity = maxTrailDensitySlider;
-	densitySpeed = densitySpeedSlider;
-	speedAffectedByTrailDensity = speedAffectedByTrailDensityToggle;
-	sensorSize = sensorSizeSlider;
-	teamColor1 = teamColor1Slider;
-	teamColor2 = teamColor2Slider;
-	teamColor3 = teamColor3Slider;
-	teamColor4 = teamColor4Slider;
-	baseColor = baseColorSlider;
-	/*double lastFrameTime = ofGetLastFrameTime() * 1000000;
-	double currentTime = ofGetCurrentTime().getAsMilliseconds();
+void ofApp::draw() {
+    const float width = std::max(1, ofGetWidth() - guiWidth);
+    const float height = std::max(1, ofGetHeight());
+    simulation.draw(width, height, routeThreshold, showAgents, showPheromones, showRoutes);
+    float scaleX = width / simulation.getWidth();
+    float scaleY = height / simulation.getHeight();
+    const auto& sites = simulation.getSites();
+    const auto& colors = simulation.getColors();
+    for (unsigned team = 0; team < SlimeSimulation::teamCount; ++team) {
+        const auto& color = colors[team];
+        ofSetColor(ofFloatColor(color.r, color.g, color.b));
+        for (unsigned site = 0; site < simulation.getSiteCounts()[team]; ++site) {
+            glm::vec2 position = glm::vec2(sites[team * 3 + site]) * glm::vec2(scaleX, scaleY);
+            ofNoFill();
+            ofSetLineWidth(1.5f);
+            ofDrawCircle(position.x, position.y, 6);
+            ofFill();
+            ofDrawCircle(position.x, position.y, 2);
+            ofDrawBitmapString(ofToString(team + 1) + char('A' + site), position.x + 8, position.y - 6);
+        }
+    }
+    ofSetLineWidth(1.0f);
+    ofSetColor(19, 23, 31);
+    ofDrawRectangle(width, 0, guiWidth, height);
+    gui.setPosition(width + 10, 10);
+    gui.draw();
 
-	deltaTime = (currentTime - lastFrameTime) / 1000000000.0;*/
-}
-
-void ofApp::loadShaders() {
-	fragShader.load("shadersGL3/shader");
-	trailMapComputeShader.setupShaderFromFile(GL_COMPUTE_SHADER, "shadersGL3/trailMapShader.compute");
-	trailMapComputeShader.linkProgram();
-	particleComputeShader.setupShaderFromFile(GL_COMPUTE_SHADER, "shadersGL3/particleShader.compute");
-	particleComputeShader.linkProgram();
-}
-
-void ofApp::setupGui() {
-	gui.setup();
-	// Setup parameter sliders
-	gui.add(steerSlider.setup("Steer", 0.6, 0, 2));
-	gui.add(angleSlider.setup("Angle", 0.4, 0, 2));
-	gui.add(senseDistanceSlider.setup("SenseDistance", 20, 1, 100));
-	gui.add(decayRateSlider.setup("Decay", 0.27, 0.0, 1.0));
-	gui.add(diffuseRateSlider.setup("Diffuse", 0.3, 0, 1));
-	gui.add(speedSlider.setup("Speed", 1.0, 0, 5));
-	gui.add(maxTrailDensitySlider.setup("Max Trail Density", 7.5, 0, 50));
-	gui.add(densitySpeedSlider.setup("Density Speed", 1, 0.01, 2));
-	gui.add(sensorSizeSlider.setup("Sensor Size", 1, 0, 4));
-	gui.add(speedAffectedByTrailDensityToggle.setup("speedAffectedByTrailDensity", false));
-
-	// Setup color sliders
-	ofParameter<ofColor> param;
-	color.setHsb(0, 100, 200);
-	param.set(color);
-	gui.add(teamColor1Slider.setup("Team Color 1", param, 100, 255));
-	color.setHsb(231, 100, 200);
-	param.set(color);
-	gui.add(teamColor2Slider.setup("Team Color 2", param, 100, 255));
-	color.setHsb(119, 100, 200);
-	param.set(color);
-	gui.add(teamColor3Slider.setup("Team Color 3", param, 100, 255));
-	color.setHsb(0, 0, 200);
-	param.set(color);
-	gui.add(teamColor4Slider.setup("Team Color 4", param, 100, 255));
-	color = ofColor::black;
-	param.set(color);
-	gui.add(baseColorSlider.setup("BaseColor", param, 100, 255));
-	ofSetWindowTitle("Slime Mold");
-	gui.setPosition(ofGetWidth() - guiWidth, 10);
+    unsigned used = 0, active = 0, attacks = 0, wins = 0, arrivals = 0, siteCount = 0;
+    for (unsigned team = 0; team < SlimeSimulation::teamCount; ++team) {
+        used += stats[team].spent;
+        active += stats[team].exploring + stats[team].encroaching + stats[team].attacking;
+        attacks += stats[team].attacking;
+        wins += stats[team].wins;
+        arrivals += stats[team].arrivals;
+        siteCount += simulation.getSiteCounts()[team];
+    }
+    std::ostringstream text;
+    text << "25 teams / " << siteCount << " fixed sites\n"
+         << SlimeSimulation::agentsPerTeam << " agents/team (fixed)\n"
+         << "Turn " << simulation.getTurn() << " / " << std::fixed << std::setprecision(0) << ofGetFrameRate() << " fps\n\n"
+         << "Local pheromones only\n"
+         << "Mist: pheromones\n"
+         << "Solid color: established route\n"
+         << "White dots: agents\n"
+         << "Amber diamonds: attacking\n"
+         << "Rings: fixed sites\n\n"
+         << "Latest sampled turn:\n"
+         << "Energy: " << used << " / " << budget * 25 << "\n"
+         << "Active agents: " << active << "\n"
+         << "Attacks / wins: " << attacks << " / " << wins << "\n"
+         << "Site arrivals: " << arrivals << "\n\n"
+         << "R: new sites + colonies\n"
+         << "Space: pause   N: step\n"
+         << "S / L: save / load controls\n"
+         << "Seed: " << seed;
+    ofSetColor(220, 225, 235);
+    ofDrawBitmapString(text.str(), width + 12, gui.getHeight() + 32);
 }
 
 void ofApp::reset() {
-	doubleBufferedTrailMap.update(trailMapSize);
-
-	int radius = 300;
-	ofVec2f centerPoint = ofVec2f(width / 2, height / 2);
-	for (auto& p : particleSize) {
-		int team = (int)ofRandom(0, numTeams);
-
-		float distance = ofRandom(0, radius);
-		float angle = ofRandom(0, 359);
-		ofVec2f dir = ofVec2f(cos(angle), sin(angle));
-		ofVec2f point = centerPoint + dir * distance;
-
-		p.pos.x = point.x;
-		p.pos.y = point.y;
-		p.pos.z = (180 + angle);
-
-		p.speciesMask.r = team == 0;
-		p.speciesMask.g = team == 1;
-		p.speciesMask.b = team == 2;
-		p.speciesMask.a = team > 2;
-	}
-
-	particleBuffer.updateData(particleSize);
+    seed = static_cast<unsigned>(ofGetSystemTimeMicros());
+    simulation.reset(seed);
+    stats = {};
 }
 
-//--------------------------------------------------------------
-void ofApp::keyPressed(int key){
-	if (key == 'r') {
-		reset();
-	}
+void ofApp::keyPressed(int key) {
+    if (key == 'r' || key == 'R') reset();
+    else if (key == ' ') paused = !paused;
+    else if (key == 'n' || key == 'N') { paused = true; singleStep = true; }
+    else if (key == 's' || key == 'S') gui.saveToFile("colony-settings.xml");
+    else if (key == 'l' || key == 'L') gui.loadFromFile("colony-settings.xml");
 }
-
-//--------------------------------------------------------------
-void ofApp::keyReleased(int key){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::mouseMoved(int x, int y ){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::mouseDragged(int x, int y, int button){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::mousePressed(int x, int y, int button){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::mouseReleased(int x, int y, int button){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::mouseEntered(int x, int y){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::mouseExited(int x, int y){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::windowResized(int w, int h){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::gotMessage(ofMessage msg){
-
-}
-
-//--------------------------------------------------------------
-void ofApp::dragEvent(ofDragInfo dragInfo){ 
-
-}
-

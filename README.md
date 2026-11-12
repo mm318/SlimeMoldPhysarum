@@ -2,6 +2,68 @@
 
 An openFrameworks slime mold simulation using OpenGL compute shaders.
 
+## Colonies, routes, and energy
+
+There are 25 teams. Each team starts with a randomly chosen 2 or 3 permanent
+sites and a fixed population of 1,536 agents (38,400 agents total). Its agents
+start uniformly distributed inside small disks around those sites. Resetting
+with **R** creates new sites and colonies together.
+
+Movement uses **local pheromones only**. Scouts start with random headings and
+make persistent random walks. Each colony has its own scent within its team's
+field. Sites emit that scent locally, and departing agents spread it as they
+explore. It diffuses and evaporates. Agents prefer fresh space and respond to
+locally sampled scent from their team's other colonies. Discovery depends on
+exploration and overlapping scent trails; it takes longer than direct homing.
+
+A separate route-strength field is reinforced after an agent physically reaches
+another site. Dense scout pheromone alone cannot establish a route. At contact,
+agents reverse their travel direction and follow the previous colony's local
+scent. Efficient completed trips reinforce routes more strongly, while unused
+connections fade. The network emerges from discovery and repeated travel.
+
+| Appearance | Meaning |
+| --- | --- |
+| Faint colored mist | Locally diffusing colony pheromone |
+| Solid team color with a dark edge | Established route |
+| Bright white dots with dark outlines | Moving agents |
+| Dim white dots | Agents waiting for energy |
+| Amber diamonds | Attacking agents |
+| Labeled colored rings | Permanent sites, e.g. `12A`, `12B` |
+
+The sidebar has independent visibility switches for pheromones, routes, and
+agents. **Other colony scent** controls the response to nearby scent gradients;
+**Explore fresh space** encourages leaving already explored areas, and
+**Exploration turning** controls random wandering. **Local sensor distance**
+sets how far ahead agents sample. These controls replace direct site attraction.
+
+Every simulation turn refreshes a shared energy pool for each team. The default
+budget is 768, and action costs are:
+
+| Action | Energy |
+| --- | ---: |
+| Explore free space or follow your own scent | 1 |
+| Enter another team's weak pheromone | 3 |
+| Attack another team's established route | 12 |
+
+The pool can fund any subset of the team's agents. Agents that cannot afford
+their next action wait; they do not die. Allocation order rotates each turn.
+Unused energy expires at the end of the turn. Controls preserve the ordering
+`exploration < foreign pheromone < attack`.
+
+An established route has route strength above the adjustable density threshold.
+Attackers wait at its border and spend energy to attack the next segment. A
+contest resolves simultaneous attacks on each targeted route segment: attacking
+effort competes against route strength and current reinforcement. Either side
+can win. A successful attack erases the defending route segment; a failed attack
+spends energy without erasing it. Colony scents and permanent sites remain.
+
+The sidebar controls energy, movement, scent, and combat. **Space** pauses,
+**N** advances one turn, and **S / L** saves or loads controls in
+`build/bin/data/colony-settings.xml`. The statistics describe the latest sampled
+turn, not cumulative totals. Simulation speed is measured in turns; changing
+the turns-per-frame control accelerates it.
+
 ## Build on Linux
 
 The CMake build uses [mm318/ofxCMake](https://github.com/mm318/ofxCMake), pinned
@@ -40,8 +102,24 @@ sudo /home/user/of_v0.12.1_linux64_gcc6_release/scripts/linux/ubuntu/install_dep
 
 The build compiles the openFrameworks core, the release's `ofxGui` addon, and
 the application together. Generated libraries stay in `build/lib`; the
-executable and a copy of `bin/data` (shaders and settings) go in `build/bin`.
+executable and a copy of `bin/data` (shaders) go in `build/bin`. Subsequent
+builds also copy shader edits when no C++ files require recompilation.
 The openFrameworks installation is left unchanged. A graphical session and an
 OpenGL 4.4-capable driver are required by the bundled GLSL 4.40 shaders. This
 ofxCMake revision supports desktop Linux. The app uses X11 (XWayland in a
 Wayland session), matching openFrameworks 0.12.1's Linux window backend.
+
+## Verification
+
+The default build includes GPU integration checks for colony initialization,
+reproducible resets, independent team fields, pooled energy limits, terrain
+costs, combat outcomes, route erasure, exploration, independence from distant
+site positions, local scent-guided connections, and separate rendering layers:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Tests use a hidden OpenGL window. If `xvfb-run` is available, CMake runs them in
+a virtual display with software rendering; otherwise a graphical session is
+required. Disable the test executable with `-DBUILD_TESTING=OFF` if desired.

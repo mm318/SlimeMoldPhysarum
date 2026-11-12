@@ -1,143 +1,169 @@
 #version 440
+#pragma include "common.glsl"
 
-struct Particle {
-	vec4 pos;
-	vec4 speciesMask;
-};
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) buffer Agents { Agent agents[]; };
+layout(std430, binding = 1) readonly buffer Trails { vec4 trails[]; };
+layout(std430, binding = 3) buffer Contributions { uvec4 contributions[]; };
+layout(std430, binding = 4) readonly buffer Sites { vec4 sites[]; };
+layout(std430, binding = 5) buffer Statistics { TeamStats stats[]; };
+layout(std430, binding = 6) buffer Attacks { uint attacks[]; };
 
-struct Cell {
-	vec4 val;
-};
-
-uniform int screenWidth;
-uniform int screenHeight;
-uniform float senseAngle;
-uniform float steerStrength;
-uniform float senseDistance;
+uniform ivec2 gridSize;
+uniform int agentsPerTeam;
+uniform int turn;
+uniform int budget;
+uniform ivec3 costs;
 uniform float speed;
-uniform float maxTrailDensity;
-uniform float densitySpeed;
-uniform int sensorSize;
-uniform bool speedAffectedByTrailDensity;
-uniform float deltaTime;
+uniform float sensorDistance;
+uniform float turnAngle;
+uniform float scentAttraction;
+uniform float freshSpace;
+uniform float trailFollowing;
+uniform float avoidance;
+uniform float exploration;
+uniform float routeThreshold;
 
-layout(binding = 0) buffer particle {
-	Particle particles[];
-};
-
-layout(binding = 1) buffer oldTrail {
-	Cell oldTrailMap[];
-};
-
-layout(binding = 2) buffer newTrail {
-	Cell newTrailMap[];
-};
-
-float scaleSpeed(float speed, float scalar) {
-	return speed * (scalar / (maxTrailDensity / 4));
+int cellAt(vec2 position) {
+    ivec2 cell = clamp(ivec2(position), ivec2(0), gridSize - 1);
+    return cell.x + cell.y * gridSize.x;
 }
 
-// Hash function www.cs.ubc.ca/~rbridson/docs/schechter-sca08-turbulence.pdf
-uint hash(uint state)
-{
-	state ^= 2747636419u;
-	state *= 2654435769u;
-	state ^= state >> 16;
-	state *= 2654435769u;
-	state ^= state >> 16;
-	state *= 2654435769u;
-	return state;
+// Read only the local field. Colony coordinates never enter steering.
+float otherScent(vec4 field, int origin, int previous) {
+    if (previous != origin) return field[previous];
+    float strongest = 0.0;
+    for (int colony = 0; colony < 3; ++colony) {
+        if (colony != origin) strongest = max(strongest, field[colony]);
+    }
+    return strongest;
 }
 
-float scaleToRange01(uint state)
-{
-	return state / 4294967295.0;
+float directionScore(Agent agent, vec2 direction, float offset) {
+    vec2 samplePosition = agent.position.xy + direction * sensorDistance;
+    if (any(lessThan(samplePosition, vec2(0))) || any(greaterThanEqual(samplePosition, vec2(gridSize)))) {
+        return -1000.0;
+    }
+    int team = int(agent.identity.x);
+    int origin = int(agent.identity.y % 3u);
+    int previous = int(agent.identity.z % 3u);
+    int field = cellAt(samplePosition) * TEAM_COUNT;
+    vec4 sampleField = trails[field + team];
+    vec4 here = trails[cellAt(agent.position.xy) * TEAM_COUNT + team];
+    float currentSignal = otherScent(here, origin, previous);
+    float scentGradient = (otherScent(sampleField, origin, previous) - currentSignal) / (1.0 + currentSignal);
+    float ownGradient = (sampleField[origin] - here[origin]) / (1.0 + here[origin]);
+    float foreignScent = 0.0;
+    float foreignRoute = 0.0;
+    for (int other = 0; other < TEAM_COUNT; ++other) {
+        if (other == team) continue;
+        vec4 enemy = trails[field + other];
+        foreignScent = max(foreignScent, max(max(enemy.x, enemy.y), max(enemy.z, enemy.w)));
+        foreignRoute = max(foreignRoute, enemy.w);
+    }
+    float crossingPenalty = foreignRoute >= routeThreshold ? 1.0 : (foreignScent >= 0.05 ? 0.25 : 0.0);
+    // Scouts prefer fresh space; experienced couriers can follow routes that
+    // were reinforced after an actual visit to another colony.
+    float routeScore = agent.state.y > 0.0 ? sampleField.w / (1.0 + sampleField.w) : 0.0;
+    return 3.0 * scentAttraction * scentGradient - freshSpace * ownGradient +
+           trailFollowing * routeScore - avoidance * crossingPenalty + 0.08 * cos(offset);
 }
 
-float sense(Particle particle, float angleOffset) {
-	float angle = mod(particle.pos.z + angleOffset + 360.0, 360.0);
-	vec2 direction = vec2(cos(angle), sin(angle));
-	vec2 senseLocation = senseDistance * direction + particle.pos.xy;
-	float sum = 0;
-	vec4 senseWeight = particle.speciesMask * 2 - 1;
-	for (int modX = -sensorSize; modX <= sensorSize; modX++) {
-		int targetX = int(senseLocation.x) + modX;
-		if (targetX < 0 || targetX > screenWidth - 1) {
-			continue;
-		}
-		for (int modY = -sensorSize; modY <= sensorSize; modY++) {
-			int targetY = int(senseLocation.y) + modY;
-			if (targetY < 0 || targetY > screenHeight - 1) {
-				continue;
-			}
-			int index = targetX + (targetY * screenWidth);
-			sum += dot(senseWeight, oldTrailMap[index].val);	
-		}
-	}
-	int sensorArea = sensorSize == 0 ? 1 : (sensorSize + 2) * (sensorSize + 2);
-	return sum / (maxTrailDensity * densitySpeed);
+bool reserveEnergy(uint team, uint cost) {
+    uint used = atomicAdd(stats[team].spent, 0u);
+    while (used + cost <= uint(budget)) {
+        uint previous = atomicCompSwap(stats[team].spent, used, used + cost);
+        if (previous == used) return true;
+        used = previous;
+    }
+    return false;
 }
 
-
-layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 void main() {
-	// Move Particles
-	Particle particle = particles[gl_GlobalInvocationID.x];
-	float left = sense(particle, -senseAngle);
-	float right = sense(particle, senseAngle);
-	float straight = sense(particle, 0.0);
+    uint invocation = gl_GlobalInvocationID.x;
+    if (invocation >= uint(TEAM_COUNT * agentsPerTeam)) return;
+    uint team = invocation / uint(agentsPerTeam);
+    // Rotate which physical agents get the first chance at the shared budget.
+    // Unspent energy can pay for expensive actions by any other team member.
+    uint local = (invocation % uint(agentsPerTeam) + uint(turn) * 499u) % uint(agentsPerTeam);
+    uint index = team * uint(agentsPerTeam) + local;
+    Agent agent = agents[index];
+    agent.state.z = 0.0;
+    if (speed <= 0.0 || budget == 0) {
+        agents[index] = agent;
+        return;
+    }
 
-	float randomness = scaleToRange01(hash(uint(particle.pos.x + particle.pos.y * screenWidth)));
+    float bestScore = -1e10;
+    // Persistent random walk: one small angular perturbation, rather than
+    // picking a completely unrelated direction at each step in empty space.
+    float wander = (random01(agent.identity.w ^ hash(uint(turn) + 73u)) - 0.5) * exploration;
+    float baseHeading = agent.position.z + wander;
+    float heading = baseHeading;
+    for (int candidate = -2; candidate <= 2; ++candidate) {
+        float offset = float(candidate) * turnAngle;
+        float angle = baseHeading + offset;
+        vec2 direction = vec2(cos(angle), sin(angle));
+        float score = directionScore(agent, direction, offset);
+        if (score > bestScore) {
+            bestScore = score;
+            heading = angle;
+        }
+    }
+    vec2 nextPosition = clamp(agent.position.xy + vec2(cos(heading), sin(heading)) * speed,
+                              vec2(0.01), vec2(gridSize) - 0.01);
+    int field = cellAt(nextPosition) * TEAM_COUNT;
+    float foreign = 0.0;
+    float foreignRoute = 0.0;
+    for (int other = 0; other < TEAM_COUNT; ++other) {
+        if (other == int(team)) continue;
+        vec4 enemy = trails[field + other];
+        foreign = max(foreign, max(max(enemy.x, enemy.y), max(enemy.z, enemy.w)));
+        foreignRoute = max(foreignRoute, enemy.w);
+    }
+    int action = foreignRoute >= routeThreshold ? 2 : (foreign >= 0.05 ? 1 : 0);
+    if (!reserveEnergy(team, uint(costs[action]))) {
+        agents[index] = agent;
+        return;
+    }
 
-	float angle = particles[gl_GlobalInvocationID.x].pos.z;
-	float localSpeed = speed;
-
-	if (straight > left && straight > right) {
-		//particles[gl_GlobalInvocationID.x].pos.z -= steerStrength;
-		if (speedAffectedByTrailDensity) {
-			localSpeed = scaleSpeed(localSpeed, straight);
-		}
-		
-	}
-	else if (straight < left && straight < right) {
-		angle = mod(angle + (randomness - 0.5) * 2 * steerStrength * deltaTime + 360.0, 360.0);
-		if (speedAffectedByTrailDensity) {
-			localSpeed = scaleSpeed(localSpeed, (left + right) * 0.5);
-		}
-	}
-	else if (left > straight && left > right) {
-		angle = mod(angle - (randomness * steerStrength * deltaTime + 360.0), 360.0);
-		if (speedAffectedByTrailDensity) {
-			localSpeed = scaleSpeed(localSpeed, left);
-		}
-	}
-	else if (right > straight && right > left) {
-		angle = mod(angle + (randomness * steerStrength * deltaTime + 360.0), 360.0);
-		if (speedAffectedByTrailDensity) {
-			localSpeed = scaleSpeed(localSpeed, right);
-		}
-	}
-	else {
-		if (speedAffectedByTrailDensity) {
-			localSpeed = scaleSpeed(localSpeed, 0.1);
-		}
-	}
-	vec2 direction = vec2(cos(angle), sin(angle));
-	vec2 newPos = particle.pos.xy + direction * localSpeed * deltaTime;
-	if (newPos.x < 0 || newPos.x > screenWidth - 1 || newPos.y < 0 || newPos.y > screenHeight - 1) {
-		newPos.x = min(screenWidth - 1, max(0, particle.pos.x));
-		newPos.y = min(screenHeight - 1, max(0, particle.pos.y));
-		angle = mod(angle + 60, 360.0f);
-		//particles[gl_GlobalInvocationID.x].pos.z = mod((particles[gl_GlobalInvocationID.x].pos.z + 60), 360.0f);
-		//particles[gl_GlobalInvocationID.x].pos.z = rand(gl_GlobalInvocationID.xy) * 360.0;
-	}
-	particles[gl_GlobalInvocationID.x].pos = vec4(newPos.x, newPos.y, angle, 0);
-	
-	int index = int(newPos.x) + int(newPos.y) * screenWidth;
-
-	// Modify Trail
-	vec4 val = oldTrailMap[index].val;
-	oldTrailMap[index].val = vec4(min(val.r + 1 * particle.speciesMask.r, maxTrailDensity), min(val.g + 1 * particle.speciesMask.g, maxTrailDensity), min(val.b + 1 * particle.speciesMask.b, maxTrailDensity), min(val.a + 1 * particle.speciesMask.a, maxTrailDensity));
-
+    agent.state.z = float(action + 1);
+    if (action == 2) {
+        atomicAdd(stats[team].attacking, 1u);
+        atomicAdd(attacks[field + int(team)], 1u);
+        // An attacker waits at the border; only a successful contested clearing
+        // lets it cross on a later turn. Losing consumes energy, not population.
+        agent.position.z = heading;
+    } else {
+        if (action == 0) atomicAdd(stats[team].exploring, 1u);
+        else atomicAdd(stats[team].encroaching, 1u);
+        agent.position.w += distance(nextPosition, agent.position.xy);
+        agent.position.xy = nextPosition;
+        agent.position.z = heading;
+        // Coordinates are consulted only for physical contact with a site,
+        // never to choose a heading or infer a distant site's direction.
+        for (uint colony = 0u; colony < 3u; ++colony) {
+            uint visited = team * 3u + colony;
+            if (visited == agent.identity.y || sites[visited].z == 0.0) continue;
+            if (distance(nextPosition, sites[visited].xy) > 2.0) continue;
+            float directDistance = distance(sites[agent.identity.y].xy, sites[visited].xy);
+            agent.state.x = clamp(directDistance / max(agent.position.w, directDistance), 0.15, 1.0);
+            agent.state.y += 1.0;
+            agent.position.w = 0.0;
+            agent.identity.z = agent.identity.y;
+            agent.identity.y = visited;
+            // Reverse along the route just traveled, then navigate using the
+            // previous colony's locally available scent.
+            agent.position.z += 3.14159265359;
+            atomicAdd(stats[team].arrivals, 1u);
+            break;
+        }
+    }
+    int depositField = cellAt(agent.position.xy) * TEAM_COUNT + int(team);
+    atomicAdd(contributions[depositField][int(agent.identity.y % 3u)], 2u);
+    if (agent.state.y > 0.0) {
+        uint deposit = uint(2.0 + 6.0 * agent.state.x);
+        atomicAdd(contributions[depositField].w, deposit);
+    }
+    agents[index] = agent;
 }
-

@@ -1,69 +1,58 @@
-// fragment shader
-
 #version 440
+#pragma include "common.glsl"
 
+layout(std430, binding = 1) readonly buffer Trails { vec4 trails[]; };
+uniform ivec2 gridSize;
+uniform vec2 drawSize;
+uniform float routeThreshold;
+uniform vec4 teamColors[TEAM_COUNT];
+uniform bool showPheromones;
+uniform bool showRoutes;
 out vec4 outputColor;
-uniform int screenWidth;
-uniform int screenHeight;
-uniform float decay;
-uniform float maxTrailDensity;
-uniform float xRatio;
-uniform float yRatio;
-uniform vec4 teamColor1;
-uniform vec4 teamColor2;
-uniform vec4 teamColor3;
-uniform vec4 teamColor4;
-uniform vec4 baseColor;
 
-struct Cell {
-    vec4 val;
-};
+float routeAt(ivec2 cell, int team) {
+    cell = clamp(cell, ivec2(0), gridSize - 1);
+    return trails[(cell.x + cell.y * gridSize.x) * TEAM_COUNT + team].w;
+}
 
-layout(binding = 2) buffer newTrail {
-	Cell newTrailMap[];
-};
-
-void main()
-{
-    float x = gl_FragCoord.x / xRatio; 
-    float y = gl_FragCoord.y / yRatio; 
-    int index = int(x) + int(int(y) * screenWidth);
-    
-    vec4 val = newTrailMap[index].val / maxTrailDensity;
-   // if (val.r > 0) {
-   //     val.r += decay;  
-   //} 
-   //if (val.g > 0) {
-   //     val.g += decay;
-   //}
-   //if (val.b > 0) {
-   //     val.g += decay;
-   //}
-   //if (val.a > 0) {
-   //     val.a += decay;
-   //}
-
-   float modR = max(0, val.r - val.g - val.b - val.a);
-   float modG = max(0, val.g - val.r - val.b - val.a);
-   float modB = max(0, val.b - val.g - val.r - val.a);
-   float modA = max(0, val.a - val.g - val.b - val.r);
-
-   vec4 chosenColor = baseColor;
-   float weight = 1;
-   if (val.r > val.g && val.r > val.b && val.r > val.a) {
-        chosenColor = teamColor1;
-        weight = modR;
-   } else if (val.g > val.r && val.g > val.b && val.g > val.a) {
-        chosenColor = teamColor2;
-        weight = modG;
-   } else if (val.b > val.r && val.b > val.g && val.b > val.a) {
-        chosenColor = teamColor3;
-       weight = modB;
-   } else if (val.a > val.g && val.a > val.b && val.a > val.r) {
-        chosenColor = teamColor4;
-       weight = modA;
-   }
-   outputColor = mix(baseColor, chosenColor, weight + decay);
-   //outputColor = vec4(colorR, colorG, 0, colorR + colorG);
-
+void main() {
+    vec2 uv = vec2(gl_FragCoord.x / drawSize.x, 1.0 - gl_FragCoord.y / drawSize.y);
+    ivec2 cell = clamp(ivec2(uv * vec2(gridSize)), ivec2(0), gridSize - 1);
+    int field = (cell.x + cell.y * gridSize.x) * TEAM_COUNT;
+    vec3 fogColor = vec3(0.0);
+    float fogTotal = 0.0;
+    float strongestScent = 0.0;
+    float strongestRoute = 0.0;
+    int owner = 0;
+    for (int team = 0; team < TEAM_COUNT; ++team) {
+        vec4 density = trails[field + team];
+        float scent = max(max(density.x, density.y), density.z);
+        float weight = log(1.0 + scent);
+        fogColor += teamColors[team].rgb * weight;
+        fogTotal += weight;
+        strongestScent = max(strongestScent, scent);
+        if (density.w > strongestRoute) {
+            strongestRoute = density.w;
+            owner = team;
+        }
+    }
+    vec3 color = vec3(0.018, 0.023, 0.033);
+    if (showPheromones) {
+        // Scent is a translucent, subdued cloud, separate from route strength.
+        float opacity = 0.38 * (1.0 - exp(-strongestScent * 0.6));
+        vec3 tint = mix(vec3(0.16), fogColor / max(fogTotal, 0.0001), 0.7);
+        color = mix(color, tint, opacity);
+    }
+    if (showRoutes && strongestRoute >= routeThreshold) {
+        // Solid team-colored routes have a crisp dark border; they never turn
+        // into white blobs that can be confused with the agent sprites.
+        vec2 withinCell = fract(uv * vec2(gridSize));
+        vec2 border = clamp(0.75 * vec2(gridSize) / drawSize, vec2(0.08), vec2(0.3));
+        bool edge = (withinCell.x < border.x && routeAt(cell - ivec2(1, 0), owner) < routeThreshold) ||
+                    (withinCell.x > 1.0 - border.x && routeAt(cell + ivec2(1, 0), owner) < routeThreshold) ||
+                    (withinCell.y < border.y && routeAt(cell - ivec2(0, 1), owner) < routeThreshold) ||
+                    (withinCell.y > 1.0 - border.y && routeAt(cell + ivec2(0, 1), owner) < routeThreshold);
+        color = teamColors[owner].rgb * (edge ? 0.28 : 0.82);
+    }
+    outputColor = vec4(color, 1.0);
 }
