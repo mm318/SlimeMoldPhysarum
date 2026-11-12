@@ -43,6 +43,5 @@ the application together. Generated libraries stay in `build/lib`; the
 executable and a copy of `bin/data` (shaders and settings) go in `build/bin`.
 The openFrameworks installation is left unchanged. A graphical session and an
 OpenGL 4.4-capable driver are required by the bundled GLSL 4.40 shaders. This
-ofxCMake revision supports desktop Linux; the existing Visual Studio files are
-legacy projects. The app uses X11 (XWayland in a Wayland session), matching
-openFrameworks 0.12.1's Linux window backend.
+ofxCMake revision supports desktop Linux. The app uses X11 (XWayland in a
+Wayland session), matching openFrameworks 0.12.1's Linux window backend.

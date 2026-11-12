@@ -1,3 +1,26 @@
 /build*/
 /cmake-build-*/
 /CMakeUserPresets.json
+
+# Runtime data is source; executables and copied libraries are generated.
+/bin/*
+!/bin/data/
+/obj/
+/.vs/
+
+# Compiled artifacts and legacy Visual Studio projects.
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.exp
+*.pdb
+*.ilk
+*.res
+*.sln
+*.vcxproj*
