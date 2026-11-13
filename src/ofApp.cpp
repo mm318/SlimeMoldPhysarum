@@ -17,9 +17,12 @@ void ofApp::setup() {
     controls.add(showAgents.set("Show agents", true));
     controls.add(turnsPerFrame.set("Turns per frame", 1, 1, 8));
     controls.add(budget.set("Team energy per turn", 768, 0, 6144));
-    controls.add(exploreCost.set("Explore cost", 1, 1, 8));
-    controls.add(encroachCost.set("Foreign scent cost", 3, 2, 24));
-    controls.add(attackCost.set("Attack cost", 12, 3, 64));
+    controls.add(exploreCost.set("Explore / return cost", 1, 1, 64));
+    controls.add(encroachCost.set("Foreign scent cost", 3, 1, 64));
+    controls.add(attackCost.set("Attack cost", 12, 1, 64));
+    controls.add(defenseCost.set("Defense cost", 8, 1, 64));
+    controls.add(defenseProbability.set("Defend probability", 0.5f, 0.0f, 1.0f));
+    controls.add(explorationSteps.set("Outbound actions", 96, 8, 160));
     controls.add(speed.set("Speed", 0.65f, 0.1f, 1.5f));
     controls.add(scentAttraction.set("Other colony scent", 1.4f, 0.0f, 5.0f));
     controls.add(freshSpace.set("Explore fresh space", 0.8f, 0.0f, 3.0f));
@@ -30,8 +33,6 @@ void ofApp::setup() {
     controls.add(diffusion.set("Pheromone diffusion", 0.12f, 0.0f, 0.5f));
     controls.add(evaporation.set("Pheromone evaporation", 0.006f, 0.0f, 0.05f));
     controls.add(routeThreshold.set("Strong trail density", 3.0f, 0.5f, 24.0f));
-    controls.add(attackPower.set("Attack power", 6.0f, 0.1f, 30.0f));
-    controls.add(defense.set("Route defense", 1.5f, 0.1f, 6.0f));
     gui.setup(controls, "colony-settings.xml");
     gui.setPosition(ofGetWidth() - guiWidth + 10, 10);
     seed = static_cast<unsigned>(ofGetSystemTimeMicros());
@@ -44,6 +45,9 @@ SlimeSimulation::Parameters ofApp::parameters() const {
     result.exploreCost = exploreCost;
     result.encroachCost = encroachCost;
     result.attackCost = attackCost;
+    result.defenseCost = defenseCost;
+    result.defenseProbability = defenseProbability;
+    result.explorationSteps = explorationSteps;
     result.speed = speed;
     result.scentAttraction = scentAttraction;
     result.freshSpace = freshSpace;
@@ -54,15 +58,10 @@ SlimeSimulation::Parameters ofApp::parameters() const {
     result.diffusion = diffusion;
     result.evaporation = evaporation;
     result.routeThreshold = routeThreshold;
-    result.attackPower = attackPower;
-    result.defense = defense;
     return result;
 }
 
 void ofApp::update() {
-    // Preserve the requested cost ordering when sliders or saved settings change.
-    if (encroachCost <= exploreCost) encroachCost = exploreCost + 1;
-    if (attackCost <= encroachCost) attackCost = encroachCost + 1;
     if (!paused || singleStep) {
         int count = singleStep ? 1 : turnsPerFrame.get();
         for (int i = 0; i < count; ++i) simulation.step(parameters());
@@ -81,15 +80,19 @@ void ofApp::draw() {
     const auto& colors = simulation.getColors();
     for (unsigned team = 0; team < SlimeSimulation::teamCount; ++team) {
         const auto& color = colors[team];
-        ofSetColor(ofFloatColor(color.r, color.g, color.b));
         for (unsigned site = 0; site < simulation.getSiteCounts()[team]; ++site) {
             glm::vec2 position = glm::vec2(sites[team * 3 + site]) * glm::vec2(scaleX, scaleY);
+            ofSetColor(0, 0, 0, 230);
+            ofFill();
+            ofDrawCircle(position.x, position.y, 8);
+            ofSetColor(ofFloatColor(color.r, color.g, color.b));
             ofNoFill();
             ofSetLineWidth(1.5f);
             ofDrawCircle(position.x, position.y, 6);
             ofFill();
             ofDrawCircle(position.x, position.y, 2);
-            ofDrawBitmapString(ofToString(team + 1) + char('A' + site), position.x + 8, position.y - 6);
+            ofDrawBitmapStringHighlight(ofToString(team + 1) + char('A' + site), position.x + 10, position.y - 8,
+                                       ofColor(0, 0, 0, 220), ofColor::white);
         }
     }
     ofSetLineWidth(1.0f);
@@ -98,32 +101,40 @@ void ofApp::draw() {
     gui.setPosition(width + 10, 10);
     gui.draw();
 
-    unsigned used = 0, active = 0, attacks = 0, wins = 0, arrivals = 0, siteCount = 0;
+    unsigned used = 0, moves = 0, encroachments = 0, attacks = 0, wins = 0, visits = 0, siteCount = 0;
+    unsigned defended = 0, failed = 0, declined = 0, outbound = 0, returning = 0, homeReturns = 0, shortcuts = 0;
     for (unsigned team = 0; team < SlimeSimulation::teamCount; ++team) {
         used += stats[team].spent;
-        active += stats[team].exploring + stats[team].encroaching + stats[team].attacking;
+        moves += stats[team].exploring;
+        encroachments += stats[team].encroaching;
         attacks += stats[team].attacking;
         wins += stats[team].wins;
-        arrivals += stats[team].arrivals;
+        visits += stats[team].arrivals;
+        defended += stats[team].defended;
+        failed += stats[team].defenseFailed;
+        declined += stats[team].defenseDeclined;
+        outbound += stats[team].outbound;
+        returning += stats[team].returning;
+        homeReturns += stats[team].homeReturns;
+        shortcuts += stats[team].shortcuts;
         siteCount += simulation.getSiteCounts()[team];
     }
     std::ostringstream text;
     text << "25 teams / " << siteCount << " fixed sites\n"
          << SlimeSimulation::agentsPerTeam << " agents/team (fixed)\n"
-         << "Turn " << simulation.getTurn() << " / " << std::fixed << std::setprecision(0) << ofGetFrameRate() << " fps\n\n"
-         << "Local pheromones only\n"
-         << "Mist: pheromones\n"
-         << "Colored paths: traffic trails\n"
-         << "Bright paths: strong routes\n"
-         << "Colored dots: all agents\n"
-         << "Rings: fixed sites\n\n"
+         << "Turn " << simulation.getTurn() << " / " << std::fixed << std::setprecision(0) << ofGetFrameRate() << " fps\n"
+         << "Explore / return: " << outbound << " / " << returning << "\n\n"
          << "Latest sampled turn:\n"
          << "Energy: " << used << " / " << budget * 25 << "\n"
-         << "Active agents: " << active << "\n"
-         << "Attacks / wins: " << attacks << " / " << wins << "\n"
-         << "Site arrivals: " << arrivals << "\n\n"
-         << "R: new sites + colonies\n"
-         << "Space: pause   N: step\n"
+         << "Move / enemy: " << moves << " / " << encroachments << "\n"
+         << "Attack / clears: " << attacks << " / " << wins << "\n"
+         << "Defend / no energy: " << defended << " / " << failed << "\n"
+         << "Declined defenses: " << declined << "\n"
+         << "Home returns / cuts: " << homeReturns << " / " << shortcuts << "\n"
+         << "Site visits: " << visits << "\n\n"
+         << "Mist: scent / dots: agents\n"
+         << "Paths: traffic / rings: sites\n\n"
+         << "R: reset  Space: pause  N: step\n"
          << "S / L: save / load controls\n"
          << "Seed: " << seed;
     ofSetColor(220, 225, 235);

@@ -112,55 +112,133 @@ void checkBudgetAndFields(Simulation& simulation) {
     }
 }
 
+void checkLedger(const std::array<Simulation::TeamStats, 25>& stats, const Simulation::Parameters& p) {
+    for (auto team : stats) {
+        unsigned charged = team.exploring * p.exploreCost + team.encroaching * p.encroachCost +
+                           team.attacking * p.attackCost + team.defended * p.defenseCost;
+        require(team.spent == charged && team.spent <= p.budget, "Every paid action must appear exactly once in the shared energy ledger");
+        require(team.outbound + team.returning == Simulation::agentsPerTeam, "Phase populations must preserve the fixed agent count");
+    }
+}
+
 void checkCombat(Simulation& simulation) {
     simulation.reset(123456);
-    const auto original = simulation.readAgents();
-    std::vector<glm::vec4> trails(static_cast<std::size_t>(simulation.getWidth()) * simulation.getHeight() * 25, glm::vec4(0));
-    for (std::size_t i = 0; i < trails.size(); i += 25) trails[i].w = 12;
+    auto original = simulation.readAgents();
+    for (auto& agent : original) {
+        agent.position = agent.identity.x == 0 ? glm::vec4(10.2f, 10.2f, 0, 0) : glm::vec4(30.2f, 24.2f, 0, 0);
+    }
+    std::vector<glm::vec4> trails(64 * 48 * 25, glm::vec4(0));
+    for (std::size_t i = 0; i < trails.size(); i += 25) trails[i].w = 48;
     Simulation::Parameters p;
-    p.budget = 24;
-    p.diffusion = p.evaporation = 0;
-    unsigned attacks = 0, victories = 0;
-    for (int turn = 0; turn < 12; ++turn) {
+    p.budget = 23;
+    p.exploreCost = 2; p.encroachCost = 4; p.attackCost = 7; p.defenseCost = 5;
+    p.diffusion = p.evaporation = p.exploration = p.avoidance = p.trailFollowing = 0;
+    auto encounter = [&]() {
         simulation.uploadAgents(original);
         simulation.uploadTrails(trails);
         simulation.step(p);
         auto stats = simulation.readStats();
-        require(stats[0].attacking == 0, "A team cannot attack its own route");
+        checkLedger(stats, p);
         for (unsigned team = 1; team < 25; ++team) {
-            require(stats[team].attacking == 2 && stats[team].spent == 24, "Attacks must use the largest action cost");
-            require(stats[team].wins <= stats[team].attacking, "Cannot win more cells than attacked");
-            attacks += stats[team].attacking;
-            victories += stats[team].wins;
+            require(stats[team].attacking == p.budget / p.attackCost, "Attack cost must limit the funded attackers");
         }
-        unsigned erased = 0;
-        auto resolved = simulation.readTrails();
-        for (std::size_t i = 0; i < resolved.size(); i += 25) {
-            require(std::isfinite(resolved[i].w) && resolved[i].w >= 0, "Combat produced invalid pheromone strength");
-            erased += resolved[i].w == 0;
-        }
-        unsigned wins = 0;
-        for (auto stat : stats) wins += stat.wins;
-        require(erased == wins, "A successful attack must erase exactly its defeated route segment");
-        const auto agents = simulation.readAgents();
-        for (std::size_t i = Simulation::agentsPerTeam; i < agents.size(); ++i) {
-            require(glm::vec2(agents[i].position) == glm::vec2(original[i].position),
-                    "Attacker must not walk through a route before combat resolves");
-        }
-    }
-    require(victories > 0 && victories < attacks, "Both attackers and defenders must sometimes win");
+        return stats;
+    };
 
-    // The strongest team at a cell must also be able to attack a weaker enemy
-    // route that overlaps its own, rather than spending energy on itself.
-    for (std::size_t i = 0; i < trails.size(); i += 25) trails[i + 1].w = 8;
+    p.defenseProbability = 0;
+    auto declined = encounter();
+    require(declined[0].defended == 0 && declined[0].defenseDeclined == 1 && declined[0].defenseFailed == 0,
+            "Zero probability must decline defense without a defense charge");
+    require(simulation.readTrails()[simulation.fieldIndex(30, 24, 0)].w == 0,
+            "Even a maximum-strength route must lose without active defense");
+    require(declined[0].exploring == 11 && declined[0].spent == 22, "Declining defense must leave energy for movement");
+
+    p.defenseProbability = 1;
+    auto defended = encounter();
+    require(defended[0].defended == 1 && defended[0].defenseFailed == 0,
+            "A chosen affordable defense must always succeed");
+    require(defended[0].exploring == 9 && defended[0].spent == 23,
+            "Defense must be paid before exploration can exhaust the shared pool");
+    require(simulation.readTrails()[simulation.fieldIndex(30, 24, 0)].w >= p.routeThreshold,
+            "One funded defense must preserve its attacked segment");
+    unsigned wins = 0;
+    for (auto team : defended) wins += team.wins;
+    require(wins == 0, "Attacks must not bypass a paid defense");
+
+    p.defenseCost = 24;
+    auto unaffordable = encounter();
+    require(unaffordable[0].defenseFailed == 1 && unaffordable[0].defended == 0 && unaffordable[0].spent == 22,
+            "A chosen unaffordable defense must fail without charging energy");
+    require(simulation.readTrails()[simulation.fieldIndex(30, 24, 0)].w == 0, "Unaffordable defense must not provide passive resistance");
+
+    p.defenseCost = 5;
+    p.defenseProbability = 0.5f;
+    unsigned successes = 0, declines = 0;
+    for (int turn = 0; turn < 32; ++turn) {
+        auto stats = encounter();
+        successes += stats[0].defended;
+        declines += stats[0].defenseDeclined;
+        require(stats[0].defended + stats[0].defenseDeclined == 1, "Each threatened segment gets one defense decision");
+    }
+    require(successes > 0 && declines > 0, "Intermediate defense probability must produce both decisions");
+
+    // There is no defense event for attack intentions that cannot be paid.
+    p.budget = 6;
     simulation.uploadAgents(original);
     simulation.uploadTrails(trails);
-    p.attackPower = 1000000;
-    p.defense = 0;
     simulation.step(p);
-    const auto overlapping = simulation.readStats();
-    require(overlapping[0].attacking == 2 && overlapping[0].wins > 0,
-            "Overlapping own routes must not prevent attacks on foreign routes");
+    const auto unfunded = simulation.readStats();
+    checkLedger(unfunded, p);
+    require(unfunded[0].defended + unfunded[0].defenseDeclined + unfunded[0].defenseFailed == 0,
+            "Unfunded attacks must not trigger defense spending or decisions");
+
+    // Arbitrary positive cost configurations are allowed, including attacks
+    // cheaper than ordinary movement. No hidden ordering clamps the controls.
+    p.budget = 23; p.exploreCost = 7; p.encroachCost = 2; p.attackCost = 1; p.defenseCost = 3;
+    p.defenseProbability = 1;
+    encounter();
+}
+
+void checkCycles() {
+    Simulation simulation;
+    simulation.setup(64, 48, 54321);
+    auto previous = simulation.readAgents();
+    std::vector<float> completed(previous.size(), 0);
+    Simulation::Parameters p;
+    p.budget = Simulation::agentsPerTeam * p.encroachCost;
+    p.explorationSteps = 12;
+    p.routeThreshold = 1000;
+    p.scentAttraction = p.trailFollowing = p.avoidance = p.freshSpace = 0;
+    unsigned returns = 0, shortcuts = 0;
+    bool simultaneous = false;
+    for (int turn = 0; turn < 100; ++turn) {
+        simulation.step(p);
+        auto stats = simulation.readStats();
+        checkLedger(stats, p);
+        for (auto team : stats) {
+            simultaneous |= team.outbound > 0 && team.returning > 0;
+            returns += team.homeReturns;
+            shortcuts += team.shortcuts;
+        }
+        auto agents = simulation.readAgents();
+        for (std::size_t i = 0; i < agents.size(); ++i) {
+            const auto& agent = agents[i];
+            require(agent.journey.x == previous[i].journey.x, "Agents must retain their fixed originating home");
+            require(agent.journey.y >= 1 && agent.journey.y <= Simulation::historyCapacity, "Breadcrumb count escaped its storage capacity");
+            require(agent.state.x == 0 || agent.state.x == 1, "Unknown lifecycle phase");
+            require(glm::distance(glm::vec2(agent.position), glm::vec2(previous[i].position)) <= p.speed + 0.001f,
+                    "An agent moved farther than one step in a turn");
+            if (agent.state.w > completed[i]) {
+                require(glm::distance(glm::vec2(agent.position), glm::vec2(simulation.getSites()[agent.journey.x])) <= 2.0f,
+                        "Returning agents must reach their home before starting a new outing");
+                completed[i] = agent.state.w;
+            }
+        }
+        previous = agents;
+    }
+    require(simultaneous, "Exploration and return phases must be staggered rather than synchronized");
+    require(returns > 0, "Explorers must actually return and relaunch at their sites");
+    require(shortcuts > 0, "Return trips must be able to shorten remembered paths locally");
 }
 
 void checkLocality() {
@@ -229,18 +307,28 @@ void checkExploration() {
     Simulation simulation;
     simulation.setup(160, 120, 24680);
     const auto initial = simulation.readAgents();
+    std::vector<bool> explored(initial.size(), false);
     Simulation::Parameters p;
+    p.explorationSteps = 160;
     p.budget = Simulation::agentsPerTeam * p.encroachCost;
     p.routeThreshold = 1000;
     p.scentAttraction = p.trailFollowing = p.avoidance = 0;
-    for (int i = 0; i < 250; ++i) simulation.step(p);
+    for (int turn = 0; turn < 250; ++turn) {
+        simulation.step(p);
+        if (turn % 25 == 24) {
+            const auto sample = simulation.readAgents();
+            for (std::size_t i = 0; i < sample.size(); ++i) {
+                explored[i] = explored[i] || glm::distance(glm::vec2(initial[i].position), glm::vec2(sample[i].position)) > 12;
+            }
+        }
+    }
     const auto agents = simulation.readAgents();
     unsigned dispersed = 0;
     for (std::size_t i = 0; i < agents.size(); ++i) {
         require(std::isfinite(agents[i].position.x) && std::isfinite(agents[i].position.y), "Invalid agent position");
         require(agents[i].position.x >= 0 && agents[i].position.x < simulation.getWidth() &&
                 agents[i].position.y >= 0 && agents[i].position.y < simulation.getHeight(), "Agent escaped the world");
-        dispersed += glm::distance(glm::vec2(initial[i].position), glm::vec2(agents[i].position)) > 12;
+        dispersed += explored[i];
     }
     require(dispersed > agents.size() * 0.6, "Scouts must explore beyond their tight starting colonies");
     for (auto field : simulation.readTrails()) {
@@ -371,7 +459,9 @@ int main() {
         checkBudgetAndFields(simulation);
         std::cout << "PASS pooled budgets, zero energy, terrain costs, 25 independent fields\n";
         checkCombat(simulation);
-        std::cout << "PASS contested combat, attacker losses, route erasure\n";
+        std::cout << "PASS paid/probabilistic defense, no passive resistance, configurable cost ledger\n";
+        checkCycles();
+        std::cout << "PASS staggered outings, physical home returns, relaunch, local shortcuts\n";
         checkTemporaryRoutes(simulation);
         std::cout << "PASS intermediate-node routes, ordinary decay, voluntary abandonment\n";
         checkLocality();

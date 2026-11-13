@@ -19,8 +19,8 @@ std::vector<T> readBuffer(ofBufferObject& buffer, std::size_t count) {
 }
 }
 
-static_assert(sizeof(SlimeSimulation::Agent) == 48, "Agent must match GLSL std430");
-static_assert(sizeof(SlimeSimulation::TeamStats) == 32, "TeamStats must match GLSL std430");
+static_assert(sizeof(SlimeSimulation::Agent) == 64, "Agent must match GLSL std430");
+static_assert(sizeof(SlimeSimulation::TeamStats) == 64, "TeamStats must match GLSL std430");
 
 void SlimeSimulation::setup(int gridWidth, int gridHeight, unsigned seed) {
     if (gridWidth < 32 || gridHeight < 32) {
@@ -29,13 +29,15 @@ void SlimeSimulation::setup(int gridWidth, int gridHeight, unsigned seed) {
     width = gridWidth;
     height = gridHeight;
     if (!movementShader.loadCompute("shadersGL3/particleShader.compute") ||
+        !combatShader.loadCompute("shadersGL3/combat.compute") ||
+        !applyShader.loadCompute("shadersGL3/applyAgents.compute") ||
         !trailShader.loadCompute("shadersGL3/trailMapShader.compute") ||
         !displayShader.load("shadersGL3/shader") ||
         !agentShader.load("shadersGL3/agents")) {
         throw std::runtime_error("Cannot load simulation shaders");
     }
     // ofShader in OF 0.12.1 doesn't propagate all link failures through load().
-    for (auto* shader : {&movementShader, &trailShader, &displayShader, &agentShader}) {
+    for (auto* shader : {&movementShader, &combatShader, &applyShader, &trailShader, &displayShader, &agentShader}) {
         GLint linked = GL_FALSE;
         glGetProgramiv(shader->getProgram(), GL_LINK_STATUS, &linked);
         if (linked != GL_TRUE) throw std::runtime_error("Simulation shader failed to link");
@@ -58,6 +60,7 @@ void SlimeSimulation::reset(unsigned seed) {
     std::uniform_int_distribution<unsigned> countDistribution(2, 3);
     std::vector<Agent> agents;
     agents.reserve(teamCount * agentsPerTeam);
+    std::vector<glm::vec2> history(teamCount * agentsPerTeam * historyCapacity, glm::vec2(0));
     const float margin = 5.0f;
     const float separation = std::min(width, height) * 0.20f;
 
@@ -92,11 +95,14 @@ void SlimeSimulation::reset(unsigned seed) {
             float heading = unit(random) * 2 * pi;
             agents.push_back({glm::vec4(position, heading, 0.0f),
                               glm::uvec4(team, team * 3 + home, team * 3 + home, random()),
-                              glm::vec4(0.0f)});
+                              glm::vec4(0.0f), glm::uvec4(team * 3 + home, 1, 0, 0)});
+            history[(agents.size() - 1) * historyCapacity] = glm::vec2(sites[team * 3 + home]);
         }
     }
 
     agentBuffer.allocate(agents, GL_DYNAMIC_DRAW);
+    historyBuffer.allocate(history, GL_DYNAMIC_DRAW);
+    planBuffer.allocate(teamCount * agentsPerTeam * (sizeof(glm::vec4) + sizeof(glm::uvec4)), GL_DYNAMIC_DRAW);
     siteBuffer.allocate(sizeof(sites), sites.data(), GL_STATIC_DRAW);
     statsBuffer.allocate(sizeof(TeamStats) * teamCount, GL_DYNAMIC_DRAW);
     const auto fields = static_cast<GLsizeiptr>(width) * height * teamCount;
@@ -105,8 +111,7 @@ void SlimeSimulation::reset(unsigned seed) {
         clearBuffer(buffer);
     }
     contributionBuffer.allocate(fields * sizeof(glm::uvec4), GL_DYNAMIC_DRAW);
-    attackBuffer.allocate(fields * sizeof(unsigned), GL_DYNAMIC_DRAW);
-    clearBuffer(attackBuffer);
+    attackBuffer.allocate(fields * 2 * sizeof(unsigned), GL_DYNAMIC_DRAW);
     clearBuffer(contributionBuffer);
     clearBuffer(attackBuffer);
     clearBuffer(statsBuffer);
@@ -129,17 +134,20 @@ void SlimeSimulation::bindBuffers() {
     contributionBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 3);
     siteBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 4);
     statsBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 5);
+    historyBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 7);
     attackBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 6);
 }
 
 void SlimeSimulation::step(const Parameters& p) {
-    if (p.exploreCost == 0 || p.encroachCost <= p.exploreCost || p.attackCost <= p.encroachCost ||
+    if (p.exploreCost == 0 || p.encroachCost == 0 || p.attackCost == 0 || p.defenseCost == 0 ||
+        p.explorationSteps == 0 || p.explorationSteps > 160 ||
+        !std::isfinite(p.defenseProbability) || p.defenseProbability < 0 || p.defenseProbability > 1 ||
         p.speed < 0 || p.speed > 2 || p.routeThreshold <= 0 ||
         p.diffusion < 0 || p.diffusion > 1 || p.evaporation < 0 || p.evaporation > 1) {
         throw std::invalid_argument("Invalid simulation parameters");
     }
-    // Each turn is synchronous: sense a stable field, accumulate integer
-    // contributions atomically, then resolve combat/diffusion into a new field.
+    // First fund actual attacks, then active defense, then ordinary movement.
+    // All decisions sense the same field; cleared segments open next turn.
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     clearBuffer(contributionBuffer);
     clearBuffer(attackBuffer);
@@ -147,11 +155,13 @@ void SlimeSimulation::step(const Parameters& p) {
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
     bindBuffers();
 
+    planBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 2);
     movementShader.begin();
     movementShader.setUniform2i("gridSize", width, height);
     movementShader.setUniform1i("turn", turn);
     movementShader.setUniform1i("agentsPerTeam", agentsPerTeam);
     movementShader.setUniform1i("budget", p.budget);
+    movementShader.setUniform1i("explorationSteps", p.explorationSteps);
     movementShader.setUniform3i("costs", p.exploreCost, p.encroachCost, p.attackCost);
     movementShader.setUniform1f("speed", p.speed);
     movementShader.setUniform1f("sensorDistance", p.sensorDistance);
@@ -166,14 +176,31 @@ void SlimeSimulation::step(const Parameters& p) {
     movementShader.end();
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
+    combatShader.begin();
+    combatShader.setUniform2i("gridSize", width, height);
+    combatShader.setUniform1i("turn", turn);
+    combatShader.setUniform1i("budget", p.budget);
+    combatShader.setUniform1i("defenseCost", p.defenseCost);
+    combatShader.setUniform1f("defenseProbability", p.defenseProbability);
+    combatShader.setUniform1f("routeThreshold", p.routeThreshold);
+    combatShader.dispatchCompute((width * height + 127) / 128, 1, 1);
+    combatShader.end();
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    applyShader.begin();
+    applyShader.setUniform2i("gridSize", width, height);
+    applyShader.setUniform1i("budget", p.budget);
+    applyShader.setUniform3i("costs", p.exploreCost, p.encroachCost, p.attackCost);
+    applyShader.setUniform1i("turn", turn);
+    applyShader.dispatchCompute((teamCount * agentsPerTeam + 127) / 128, 1, 1);
+    applyShader.end();
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    trailBuffers[1 - current].bindBase(GL_SHADER_STORAGE_BUFFER, 2);
     trailShader.begin();
     trailShader.setUniform2i("gridSize", width, height);
-    trailShader.setUniform1i("turn", turn);
     trailShader.setUniform1f("diffusion", p.diffusion);
     trailShader.setUniform1f("evaporation", p.evaporation);
-    trailShader.setUniform1f("routeThreshold", p.routeThreshold);
-    trailShader.setUniform1f("attackPower", p.attackPower);
-    trailShader.setUniform1f("defense", p.defense);
     trailShader.dispatchCompute((width * height + 127) / 128, 1, 1);
     trailShader.end();
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
@@ -226,7 +253,17 @@ std::vector<glm::vec4> SlimeSimulation::readTrails() {
 void SlimeSimulation::uploadAgents(const std::vector<Agent>& agents) {
     if (agents.size() != teamCount * agentsPerTeam) throw std::invalid_argument("Agent count must remain fixed");
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
-    agentBuffer.updateData(agents);
+    auto prepared = agents;
+    bool fresh = std::all_of(prepared.begin(), prepared.end(), [](const Agent& agent) {
+        return agent.state.x == 0 && agent.journey.y <= 1 && agent.journey.z == 0;
+    });
+    if (fresh) {
+        for (auto& agent : prepared) {
+            agent.journey.x = agent.identity.y;
+            agent.journey.y = 1;
+        }
+    }
+    agentBuffer.updateData(prepared);
 }
 
 void SlimeSimulation::uploadTrails(const std::vector<glm::vec4>& trails) {

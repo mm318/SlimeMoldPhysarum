@@ -6,96 +6,36 @@ layout(std430, binding = 1) readonly buffer OldTrails { vec4 oldTrails[]; };
 layout(std430, binding = 2) writeonly buffer NewTrails { vec4 newTrails[]; };
 layout(std430, binding = 3) readonly buffer Contributions { uvec4 contributions[]; };
 layout(std430, binding = 4) readonly buffer Sites { vec4 sites[]; };
-layout(std430, binding = 6) readonly buffer Attacks { uint attacks[]; };
-layout(std430, binding = 5) buffer Statistics { TeamStats stats[]; };
-
+layout(std430, binding = 6) readonly buffer Attacks { uvec2 attacks[]; };
 uniform ivec2 gridSize;
-uniform int turn;
 uniform float diffusion;
 uniform float evaporation;
-uniform float routeThreshold;
-uniform float attackPower;
-uniform float defense;
 
 void main() {
     int cell = int(gl_GlobalInvocationID.x);
     if (cell >= gridSize.x * gridSize.y) return;
     ivec2 position = ivec2(cell % gridSize.x, cell / gridSize.x);
     int field = cell * TEAM_COUNT;
-    int owner = -1;
-    int runnerUp = -1;
-    float strongest = routeThreshold;
-    float secondStrongest = routeThreshold;
-    vec4 values[TEAM_COUNT];
     for (int team = 0; team < TEAM_COUNT; ++team) {
-        float old = oldTrails[field + team].w;
-        if (old >= strongest) {
-            runnerUp = owner;
-            secondStrongest = strongest;
-            owner = team;
-            strongest = old;
-        } else if (old >= secondStrongest) {
-            runnerUp = team;
-            secondStrongest = old;
-        }
         vec4 sum = vec4(0.0);
         float neighbors = 0.0;
-        for (int y = -1; y <= 1; ++y) {
-            for (int x = -1; x <= 1; ++x) {
-                ivec2 other = position + ivec2(x, y);
-                if (any(lessThan(other, ivec2(0))) || any(greaterThanEqual(other, gridSize))) continue;
-                sum += oldTrails[(other.x + other.y * gridSize.x) * TEAM_COUNT + team];
-                neighbors += 1.0;
-            }
+        for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x) {
+            ivec2 other = position + ivec2(x, y);
+            if (any(lessThan(other, ivec2(0))) || any(greaterThanEqual(other, gridSize))) continue;
+            sum += oldTrails[(other.x + other.y * gridSize.x) * TEAM_COUNT + team];
+            neighbors += 1.0;
         }
-        // Routes are continuous traffic reinforcement, subject to the same
-        // ordinary decay as scent. Unused branches can be abandoned freely.
-        vec4 decay = vec4(evaporation);
-        values[team] = min(vec4(MAX_SCENT, MAX_SCENT, MAX_SCENT, MAX_TRAIL),
-                           mix(oldTrails[field + team], sum / neighbors, diffusion) * (vec4(1.0) - decay) +
-                           vec4(contributions[field + team]) * 0.035);
+        vec4 value = min(vec4(MAX_SCENT, MAX_SCENT, MAX_SCENT, MAX_TRAIL),
+                         mix(oldTrails[field + team], sum / neighbors, diffusion) * (1.0 - evaporation) +
+                         vec4(contributions[field + team]) * 0.035);
         for (int colony = 0; colony < 3; ++colony) {
             vec4 site = sites[team * 3 + colony];
             vec2 offset = vec2(position) + 0.5 - site.xy;
-            if (site.z > 0.0 && dot(offset, offset) <= 2.25) {
-                values[team][colony] = MAX_SCENT;
-            }
+            if (site.z > 0.0 && dot(offset, offset) <= 2.25) value[colony] = MAX_SCENT;
         }
+        // Unfunded or declined defense loses this segment, even if some
+        // ordinary movement also deposited trail here during the turn.
+        if (attacks[field + team].y != 0u) value.w = 0.0;
+        newTrails[field + team] = value;
     }
-
-    // Every attacker targets the strongest foreign route. This is the overall
-    // owner for other teams, and the runner-up for the owner's own agents.
-    // Resolving both contests also handles overlapping established routes.
-    for (int contest = 0; contest < 2; ++contest) {
-        int defender = contest == 0 ? owner : runnerUp;
-        if (defender < 0) continue;
-        float resistance = max(0.01, defense * (oldTrails[field + defender].w +
-                               float(contributions[field + defender].w) * 0.035));
-        float total = resistance;
-        for (int team = 0; team < TEAM_COUNT; ++team) {
-            bool targetsDefender = contest == 0 ? team != owner : team == owner;
-            if (targetsDefender) total += float(attacks[field + team]) * attackPower;
-        }
-        if (total > resistance) {
-            // Simultaneous multi-team combat, resolved once per cell. Both the
-            // existing route and fresh reinforcement contribute to its defense.
-            float choice = random01(uint(cell) ^ hash(uint(turn) + 12345u + uint(contest) * 7919u)) * total;
-            if (choice >= resistance) {
-                choice -= resistance;
-                for (int team = 0; team < TEAM_COUNT; ++team) {
-                    bool targetsDefender = contest == 0 ? team != owner : team == owner;
-                    if (!targetsDefender) continue;
-                    float effort = float(attacks[field + team]) * attackPower;
-                    if (choice < effort) {
-                        values[defender].w = 0.0; // erase this segment of the defeated route
-                        values[team].w = max(values[team].w, 1.0);
-                        atomicAdd(stats[team].wins, 1u);
-                        break;
-                    }
-                    choice -= effort;
-                }
-            }
-        }
-    }
-    for (int team = 0; team < TEAM_COUNT; ++team) newTrails[field + team] = values[team];
 }

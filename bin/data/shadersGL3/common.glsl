@@ -1,11 +1,18 @@
 const int TEAM_COUNT = 25;
 const float MAX_TRAIL = 48.0;
 const float MAX_SCENT = 16.0;
+const uint HISTORY_CAPACITY = 256u;
 
 struct Agent {
     vec4 position;
     uvec4 identity;
     vec4 state;
+    uvec4 journey;
+};
+
+struct Plan {
+    vec4 step; // proposed x, y, heading, unused
+    uvec4 action; // kind (0 wait, 1 explore, 2 encroach, 3 attack), paid, return waypoint, unused
 };
 
 struct TeamStats {
@@ -15,8 +22,16 @@ struct TeamStats {
     uint attacking;
     uint wins;
     uint arrivals;
-    uint padding0;
+    uint defended;
+    uint defenseFailed;
+    uint defenseDeclined;
+    uint outbound;
+    uint returning;
+    uint homeReturns;
+    uint shortcuts;
     uint padding1;
+    uint padding2;
+    uint padding3;
 };
 
 uint hash(uint value) {

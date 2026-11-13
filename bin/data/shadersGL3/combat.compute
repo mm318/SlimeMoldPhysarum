@@ -1,0 +1,75 @@
+#version 440
+#pragma include "common.glsl"
+
+layout(local_size_x = 128) in;
+layout(std430, binding = 1) readonly buffer Trails { vec4 trails[]; };
+layout(std430, binding = 5) buffer Statistics { TeamStats stats[]; };
+layout(std430, binding = 6) buffer Attacks { uvec2 attacks[]; };
+uniform ivec2 gridSize;
+uniform int turn;
+uniform int budget;
+uniform int defenseCost;
+uniform float defenseProbability;
+uniform float routeThreshold;
+
+bool payDefense(uint team) {
+    uint used = atomicAdd(stats[team].spent, 0u);
+    while (used + uint(defenseCost) <= uint(budget)) {
+        uint previous = atomicCompSwap(stats[team].spent, used, used + uint(defenseCost));
+        if (previous == used) return true;
+        used = previous;
+    }
+    return false;
+}
+
+void main() {
+    int cell = int(gl_GlobalInvocationID.x);
+    if (cell >= gridSize.x * gridSize.y) return;
+    int field = cell * TEAM_COUNT;
+    int owner = -1, runnerUp = -1;
+    float strongest = routeThreshold, second = routeThreshold;
+    for (int team = 0; team < TEAM_COUNT; ++team) {
+        float strength = trails[field + team].w;
+        if (strength >= strongest) {
+            runnerUp = owner; second = strongest;
+            owner = team; strongest = strength;
+        } else if (strength >= second) {
+            runnerUp = team; second = strength;
+        }
+    }
+    for (int contest = 0; contest < 2; ++contest) {
+        int defender = contest == 0 ? owner : runnerUp;
+        if (defender < 0) continue;
+        uint total = 0u;
+        for (int team = 0; team < TEAM_COUNT; ++team) {
+            bool eligible = contest == 0 ? team != owner : team == owner;
+            if (eligible) total += attacks[field + team].x;
+        }
+        if (total == 0u) continue; // An unthreatened segment never spends energy.
+        uint seed = uint(cell) ^ hash(uint(turn) * 7919u + uint(defender) * 104729u + 12345u);
+        bool chosen = random01(seed) < defenseProbability;
+        if (chosen && payDefense(uint(defender))) {
+            // A paid defense always succeeds. Existing route density confers
+            // no free resistance, and no nearby agent is required.
+            atomicAdd(stats[defender].defended, 1u);
+            continue;
+        }
+        if (chosen) atomicAdd(stats[defender].defenseFailed, 1u);
+        else atomicAdd(stats[defender].defenseDeclined, 1u);
+        attacks[field + defender].y = 1u;
+
+        // Without defense the route is erased. If several teams attacked,
+        // choose one for the clearing credit, weighted by paid attackers.
+        float choice = random01(seed ^ 0xa5a5f00du) * float(total);
+        for (int team = 0; team < TEAM_COUNT; ++team) {
+            bool eligible = contest == 0 ? team != owner : team == owner;
+            if (!eligible) continue;
+            float count = float(attacks[field + team].x);
+            if (choice < count) {
+                atomicAdd(stats[team].wins, 1u);
+                break;
+            }
+            choice -= count;
+        }
+    }
+}

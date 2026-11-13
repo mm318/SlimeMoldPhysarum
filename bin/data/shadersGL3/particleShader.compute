@@ -4,15 +4,17 @@
 layout(local_size_x = 128) in;
 layout(std430, binding = 0) buffer Agents { Agent agents[]; };
 layout(std430, binding = 1) readonly buffer Trails { vec4 trails[]; };
-layout(std430, binding = 3) buffer Contributions { uvec4 contributions[]; };
+layout(std430, binding = 2) writeonly buffer Plans { Plan plans[]; };
 layout(std430, binding = 4) readonly buffer Sites { vec4 sites[]; };
 layout(std430, binding = 5) buffer Statistics { TeamStats stats[]; };
-layout(std430, binding = 6) buffer Attacks { uint attacks[]; };
+layout(std430, binding = 6) buffer Attacks { uvec2 attacks[]; };
+layout(std430, binding = 7) buffer History { vec2 history[]; };
 
 uniform ivec2 gridSize;
 uniform int agentsPerTeam;
 uniform int turn;
 uniform int budget;
+uniform int explorationSteps;
 uniform ivec3 costs;
 uniform float speed;
 uniform float sensorDistance;
@@ -24,12 +26,25 @@ uniform float avoidance;
 uniform float exploration;
 uniform float routeThreshold;
 
+#pragma include "journey.glsl"
+
 int cellAt(vec2 position) {
     ivec2 cell = clamp(ivec2(position), ivec2(0), gridSize - 1);
     return cell.x + cell.y * gridSize.x;
 }
 
-// Read only the local field. Colony coordinates never enter steering.
+int actionAt(vec2 position, uint team) {
+    int field = cellAt(position) * TEAM_COUNT;
+    float scent = 0.0, route = 0.0;
+    for (int other = 0; other < TEAM_COUNT; ++other) {
+        if (other == int(team)) continue;
+        vec4 enemy = trails[field + other];
+        scent = max(scent, max(max(enemy.x, enemy.y), max(enemy.z, enemy.w)));
+        route = max(route, enemy.w);
+    }
+    return route >= routeThreshold ? 3 : (scent >= 0.05 ? 2 : 1);
+}
+
 float otherScent(vec4 field, int origin, int previous) {
     if (previous != origin) return field[previous];
     float strongest = 0.0;
@@ -39,131 +54,116 @@ float otherScent(vec4 field, int origin, int previous) {
     return strongest;
 }
 
-float directionScore(Agent agent, vec2 direction, float offset) {
+float directionScore(Agent agent, vec2 direction, float offset, vec2 returnTarget) {
     vec2 samplePosition = agent.position.xy + direction * sensorDistance;
-    if (any(lessThan(samplePosition, vec2(0))) || any(greaterThanEqual(samplePosition, vec2(gridSize)))) {
-        return -1000.0;
-    }
+    if (any(lessThan(samplePosition, vec2(0))) || any(greaterThanEqual(samplePosition, vec2(gridSize)))) return -1000.0;
     int team = int(agent.identity.x);
+    vec4 sampleField = trails[cellAt(samplePosition) * TEAM_COUNT + team];
+    vec4 here = trails[cellAt(agent.position.xy) * TEAM_COUNT + team];
+    bool returning = agent.state.x > 0.5;
     int origin = int(agent.identity.y % 3u);
     int previous = int(agent.identity.z % 3u);
-    int field = cellAt(samplePosition) * TEAM_COUNT;
-    vec4 sampleField = trails[field + team];
-    vec4 here = trails[cellAt(agent.position.xy) * TEAM_COUNT + team];
-    float currentSignal = otherScent(here, origin, previous);
-    float scentGradient = (otherScent(sampleField, origin, previous) - currentSignal) / (1.0 + currentSignal);
+    float hereScent = returning ? here[int(agent.journey.x % 3u)] : otherScent(here, origin, previous);
+    float sampleScent = returning ? sampleField[int(agent.journey.x % 3u)] : otherScent(sampleField, origin, previous);
+    float gradient = (sampleScent - hereScent) / (1.0 + hereScent);
     float ownGradient = (sampleField[origin] - here[origin]) / (1.0 + here[origin]);
-    float foreignScent = 0.0;
-    float foreignRoute = 0.0;
-    for (int other = 0; other < TEAM_COUNT; ++other) {
-        if (other == team) continue;
-        vec4 enemy = trails[field + other];
-        foreignScent = max(foreignScent, max(max(enemy.x, enemy.y), max(enemy.z, enemy.w)));
-        foreignRoute = max(foreignRoute, enemy.w);
+    int action = actionAt(samplePosition, agent.identity.x);
+    float penalty = action == 3 ? 1.0 : (action == 2 ? 0.25 : 0.0);
+    float score = 3.0 * scentAttraction * gradient + trailFollowing * sampleField.w / (1.0 + sampleField.w);
+    if (returning) {
+        vec2 targetDirection = returnTarget - agent.position.xy;
+        score += 3.0 * dot(direction, targetDirection / max(length(targetDirection), 0.001));
+        score -= 3.0 * avoidance * penalty;
+    } else {
+        score -= freshSpace * ownGradient + avoidance * penalty;
     }
-    float crossingPenalty = foreignRoute >= routeThreshold ? 1.0 : (foreignScent >= 0.05 ? 0.25 : 0.0);
-    // All agents respond to local traffic trails, including temporary branches
-    // and junctions that haven't reached another site.
-    float routeScore = sampleField.w / (1.0 + sampleField.w);
-    return 3.0 * scentAttraction * scentGradient - freshSpace * ownGradient +
-           trailFollowing * routeScore - avoidance * crossingPenalty + 0.08 * cos(offset);
+    return score + 0.08 * cos(offset);
 }
 
-bool reserveEnergy(uint team, uint cost) {
-    uint used = atomicAdd(stats[team].spent, 0u);
-    while (used + cost <= uint(budget)) {
-        uint previous = atomicCompSwap(stats[team].spent, used, used + cost);
-        if (previous == used) return true;
-        used = previous;
+uint returnWaypoint(Agent agent, uint index) {
+    uint base = index * HISTORY_CAPACITY;
+    uint immediate = agent.journey.y > 1u ? agent.journey.y - 2u : 0u;
+    uint selected = immediate;
+    vec2 previous = agent.position.xy;
+    float pathLength = 0.0, pathCost = 0.0, selectedCost = 0.0;
+    // Candidate shortcuts stay inside the local sensor radius and only connect
+    // positions this agent has already visited. No unseen site coordinates.
+    for (int offset = 0; offset < 8; ++offset) {
+        if (uint(offset) > immediate) break;
+        uint point = immediate - uint(offset);
+        vec2 waypoint = history[base + point];
+        if (distance(agent.position.xy, waypoint) > sensorDistance) break;
+        float segment = distance(previous, waypoint);
+        pathLength += segment;
+        pathCost += segment * float(costs[actionAt((previous + waypoint) * 0.5, agent.identity.x) - 1]);
+        previous = waypoint;
+        if (offset > 0 && distance(agent.position.xy, waypoint) < pathLength * 0.99) {
+            selected = point;
+            selectedCost = pathCost;
+        }
     }
-    return false;
+    if (selected != immediate) {
+        vec2 target = history[base + selected];
+        float directCost = 0.0;
+        for (int sampleIndex = 1; sampleIndex <= 3; ++sampleIndex) {
+            int action = actionAt(mix(agent.position.xy, target, float(sampleIndex) / 3.0), agent.identity.x);
+            if (action == 3) return immediate;
+            directCost += float(costs[action - 1]) / 3.0;
+        }
+        directCost *= distance(agent.position.xy, target);
+        if (directCost >= selectedCost) return immediate;
+    }
+    return selected;
 }
 
 void main() {
     uint invocation = gl_GlobalInvocationID.x;
     if (invocation >= uint(TEAM_COUNT * agentsPerTeam)) return;
     uint team = invocation / uint(agentsPerTeam);
-    // Rotate which physical agents get the first chance at the shared budget.
-    // Unspent energy can pay for expensive actions by any other team member.
     uint local = (invocation % uint(agentsPerTeam) + uint(turn) * 499u) % uint(agentsPerTeam);
     uint index = team * uint(agentsPerTeam) + local;
     Agent agent = agents[index];
     agent.state.z = 0.0;
+    Plan plan = Plan(agent.position, uvec4(0));
     if (speed <= 0.0 || budget == 0) {
         agents[index] = agent;
+        plans[index] = plan;
         return;
     }
 
-    float bestScore = -1e10;
-    // Persistent random walk: one small angular perturbation, rather than
-    // picking a completely unrelated direction at each step in empty space.
+    if (agent.state.x < 0.5 && agent.journey.y == 1u && agent.journey.z == 0u) {
+        history[index * HISTORY_CAPACITY] = sites[agent.journey.x].xy;
+    }
+    float fraction = random01(agent.identity.w ^ 0x71baf123u);
+    uint limit = max(1u, uint(float(explorationSteps) * (agent.state.w == 0.0 ? fraction : 0.5 + fraction)));
+    if (agent.state.x < 0.5 && (agent.journey.z >= limit || agent.journey.y >= HISTORY_CAPACITY)) agent.state.x = 1.0;
+    if (agent.state.x > 0.5 && distance(agent.position.xy, sites[agent.journey.x].xy) <= 1.25) finishReturn(agent, index);
+
+    bool returning = agent.state.x > 0.5;
+    uint waypoint = returning ? returnWaypoint(agent, index) : 0u;
+    vec2 target = returning ? history[index * HISTORY_CAPACITY + waypoint] : agent.position.xy;
     float wander = (random01(agent.identity.w ^ hash(uint(turn) + 73u)) - 0.5) * exploration;
-    float baseHeading = agent.position.z + wander;
-    float heading = baseHeading;
+    float baseHeading = returning ? atan(target.y - agent.position.y, target.x - agent.position.x) + wander * 0.1 :
+                                    agent.position.z + wander;
+    float heading = baseHeading, bestScore = -1e10;
     for (int candidate = -2; candidate <= 2; ++candidate) {
         float offset = float(candidate) * turnAngle;
         float angle = baseHeading + offset;
-        vec2 direction = vec2(cos(angle), sin(angle));
-        float score = directionScore(agent, direction, offset);
-        if (score > bestScore) {
-            bestScore = score;
-            heading = angle;
-        }
+        float score = directionScore(agent, vec2(cos(angle), sin(angle)), offset, target);
+        if (score > bestScore) { bestScore = score; heading = angle; }
     }
-    vec2 nextPosition = clamp(agent.position.xy + vec2(cos(heading), sin(heading)) * speed,
-                              vec2(0.01), vec2(gridSize) - 0.01);
-    int field = cellAt(nextPosition) * TEAM_COUNT;
-    float foreign = 0.0;
-    float foreignRoute = 0.0;
-    for (int other = 0; other < TEAM_COUNT; ++other) {
-        if (other == int(team)) continue;
-        vec4 enemy = trails[field + other];
-        foreign = max(foreign, max(max(enemy.x, enemy.y), max(enemy.z, enemy.w)));
-        foreignRoute = max(foreignRoute, enemy.w);
-    }
-    int action = foreignRoute >= routeThreshold ? 2 : (foreign >= 0.05 ? 1 : 0);
-    if (!reserveEnergy(team, uint(costs[action]))) {
-        agents[index] = agent;
-        return;
-    }
-
-    agent.state.z = float(action + 1);
-    if (action == 2) {
+    float stepLength = returning ? min(speed, distance(agent.position.xy, target)) : speed;
+    vec2 next = clamp(agent.position.xy + vec2(cos(heading), sin(heading)) * stepLength, vec2(0.01), vec2(gridSize) - 0.01);
+    uint action = uint(actionAt(next, team));
+    plan.step = vec4(next, heading, 0);
+    plan.action = uvec4(action, 0u, waypoint, 0u);
+    // Only paid attacks generate threats. Defense will run before any ordinary
+    // movement can consume the remaining team energy.
+    if (action == 3u && reserveEnergy(team, uint(costs.z))) {
+        plan.action.y = 1u;
         atomicAdd(stats[team].attacking, 1u);
-        atomicAdd(attacks[field + int(team)], 1u);
-        // An attacker waits at the border; only a successful contested clearing
-        // lets it cross on a later turn. Losing consumes energy, not population.
-        agent.position.z = heading;
-    } else {
-        if (action == 0) atomicAdd(stats[team].exploring, 1u);
-        else atomicAdd(stats[team].encroaching, 1u);
-        float traveled = distance(nextPosition, agent.position.xy);
-        agent.position.w += traveled;
-        agent.position.xy = nextPosition;
-        agent.position.z = heading;
-        // Ordinary traffic is enough to build a trail. There is no site-visit
-        // prerequisite, and fighting in place does not maintain a route.
-        if (traveled > 0.0001) {
-            atomicAdd(contributions[cellAt(nextPosition) * TEAM_COUNT + int(team)].w, 4u);
-        }
-        // Coordinates are consulted only for physical contact with a site,
-        // never to choose a heading or infer a distant site's direction.
-        for (uint colony = 0u; colony < 3u; ++colony) {
-            uint visited = team * 3u + colony;
-            if (visited == agent.identity.y || sites[visited].z == 0.0) continue;
-            if (distance(nextPosition, sites[visited].xy) > 2.0) continue;
-            agent.state.y += 1.0;
-            agent.position.w = 0.0;
-            agent.identity.z = agent.identity.y;
-            agent.identity.y = visited;
-            // Reverse along the route just traveled, then navigate using the
-            // previous colony's locally available scent.
-            agent.position.z += 3.14159265359;
-            atomicAdd(stats[team].arrivals, 1u);
-            break;
-        }
+        atomicAdd(attacks[cellAt(next) * TEAM_COUNT + int(team)].x, 1u);
     }
-    int depositField = cellAt(agent.position.xy) * TEAM_COUNT + int(team);
-    atomicAdd(contributions[depositField][int(agent.identity.y % 3u)], 2u);
     agents[index] = agent;
+    plans[index] = plan;
 }

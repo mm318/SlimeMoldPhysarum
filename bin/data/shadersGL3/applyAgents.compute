@@ -1,0 +1,79 @@
+#version 440
+#pragma include "common.glsl"
+
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) buffer Agents { Agent agents[]; };
+layout(std430, binding = 2) readonly buffer Plans { Plan plans[]; };
+layout(std430, binding = 3) buffer Contributions { uvec4 contributions[]; };
+layout(std430, binding = 4) readonly buffer Sites { vec4 sites[]; };
+layout(std430, binding = 5) buffer Statistics { TeamStats stats[]; };
+layout(std430, binding = 7) buffer History { vec2 history[]; };
+uniform ivec2 gridSize;
+uniform int budget;
+uniform ivec3 costs;
+uniform int turn;
+
+#pragma include "journey.glsl"
+
+int cellAt(vec2 position) {
+    ivec2 cell = clamp(ivec2(position), ivec2(0), gridSize - 1);
+    return cell.x + cell.y * gridSize.x;
+}
+
+void main() {
+    uint invocation = gl_GlobalInvocationID.x;
+    if (invocation >= uint(agents.length())) return;
+    uint perTeam = uint(agents.length()) / uint(TEAM_COUNT);
+    uint group = invocation / perTeam;
+    uint index = group * perTeam + (invocation % perTeam + uint(turn) * 499u) % perTeam;
+    Agent agent = agents[index];
+    Plan plan = plans[index];
+    uint team = agent.identity.x;
+    bool paid = plan.action.x == 3u ? plan.action.y != 0u :
+                (plan.action.x != 0u && reserveEnergy(team, uint(costs[int(plan.action.x) - 1])));
+    if (paid) {
+        agent.state.z = float(plan.action.x);
+        bool returning = agent.state.x > 0.5;
+        if (!returning) ++agent.journey.z;
+        if (plan.action.x == 3u) {
+            agent.position.z = plan.step.z;
+        } else {
+            if (plan.action.x == 1u) atomicAdd(stats[team].exploring, 1u);
+            else atomicAdd(stats[team].encroaching, 1u);
+            float traveled = distance(plan.step.xy, agent.position.xy);
+            agent.position.xy = plan.step.xy;
+            agent.position.z = plan.step.z;
+            agent.position.w += traveled;
+            if (traveled > 0.0001) {
+                atomicAdd(contributions[cellAt(agent.position.xy) * TEAM_COUNT + int(team)].w, 4u);
+                if (!returning && agent.journey.y < HISTORY_CAPACITY) {
+                    history[index * HISTORY_CAPACITY + agent.journey.y] = agent.position.xy;
+                    ++agent.journey.y;
+                }
+            }
+            if (returning) {
+                vec2 target = history[index * HISTORY_CAPACITY + plan.action.z];
+                if (distance(agent.position.xy, target) <= 0.12) {
+                    if (agent.journey.y > plan.action.z + 2u) atomicAdd(stats[team].shortcuts, 1u);
+                    agent.journey.y = plan.action.z + 1u;
+                }
+            }
+            for (uint colony = 0u; colony < 3u; ++colony) {
+                uint visited = team * 3u + colony;
+                if (visited == agent.identity.y || sites[visited].z == 0.0 || distance(agent.position.xy, sites[visited].xy) > 2.0) continue;
+                agent.state.y += 1.0;
+                agent.position.w = 0.0;
+                agent.identity.z = agent.identity.y;
+                agent.identity.y = visited;
+                agent.state.x = 1.0; // A discovered connection also triggers a trip home.
+                atomicAdd(stats[team].arrivals, 1u);
+                break;
+            }
+            if (agent.state.x > 0.5 && distance(agent.position.xy, sites[agent.journey.x].xy) <= 1.25) finishReturn(agent, index);
+        }
+        atomicAdd(contributions[cellAt(agent.position.xy) * TEAM_COUNT + int(team)][int(agent.identity.y % 3u)], 2u);
+    }
+    if (agent.state.x > 0.5) atomicAdd(stats[team].returning, 1u);
+    else atomicAdd(stats[team].outbound, 1u);
+    agents[index] = agent;
+}

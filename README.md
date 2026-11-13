@@ -9,12 +9,27 @@ sites and a fixed population of 1,536 agents (38,400 agents total). Its agents
 start uniformly distributed inside small disks around those sites. Resetting
 with **R** creates new sites and colonies together.
 
-Movement uses **local pheromones only**. Scouts start with random headings and
+Environmental sensing uses **local pheromones**. Scouts start with random headings and
 make persistent random walks. Each colony has its own scent within its team's
 field. Sites emit that scent locally, and departing agents spread it as they
 explore. It diffuses and evaporates. Agents prefer fresh space and respond to
 locally sampled scent from their team's other colonies. Discovery depends on
 exploration and overlapping scent trails; it takes longer than direct homing.
+
+Each agent keeps its originating site as a fixed home and alternates between
+outbound exploration and returning home. **Outbound actions** sets the base
+outing length (default 96 paid actions). Initial limits vary from 1 to that
+value; later outings vary from half to one-and-a-half times it. Agents therefore
+return and explore at different times. Waiting for energy does not advance
+their outbound clock. Discovering another site can start a return early.
+
+Returners navigate their own recorded breadcrumbs and local home scent. Within
+their local sensor radius, they can skip remembered bends when the direct
+connection is shorter and cheaper, and can detour around hostile trails. They
+do not steer toward unvisited site coordinates. Arriving home starts another
+outing with a new heading; agents physically travel back and are never
+teleported or respawned. The fixed population keeps traffic flowing back to the
+sites while local shortcuts can improve existing paths.
 
 Routes emerge from continuous traffic reinforcement. Every successful movement
 deposits trail pheromone, and every agent can follow those trails, regardless of
@@ -27,9 +42,8 @@ that connection while the remaining site is still undiscovered.
 Trail reinforcement has the same evaporation rate as colony scent. Routes can
 be abandoned and fade without enemy attacks. **Strong trail density** (default
 3) controls the bright route rendering and the higher cost of attacking a busy
-enemy trail. Developing trails remain visible below that threshold. At contact
-with another site, agents reverse their travel direction and respond to the
-previous colony's local scent; site visits do not certify or protect a route.
+enemy trail. Developing trails remain visible below that threshold. Site visits
+do not certify or protect a route.
 
 | Appearance | Meaning |
 | --- | --- |
@@ -52,26 +66,45 @@ budget is 768, and action costs are:
 
 | Action | Energy |
 | --- | ---: |
-| Explore free space or follow your own scent | 1 |
+| Explore or return through free/friendly space | 1 |
 | Enter another team's weak pheromone | 3 |
 | Attack another team's established route | 12 |
+| Defend one attacked route segment | 8 |
 
 The pool can fund any subset of the team's agents. Agents that cannot afford
 their next action wait; they do not die. Allocation order rotates each turn.
-Unused energy expires at the end of the turn. Controls preserve the ordering
-`exploration < foreign pheromone < attack`.
+Unused energy expires at the end of the turn. All four costs are independently
+configurable positive integers; the defaults make hostile actions more expensive.
+
+Each turn funds actual attacks first, then resolves active defense, then funds
+ordinary exploration and return movement. This protects defense from having
+its energy exhausted by ordinary movement. A team's own attacks can still
+consume energy it might otherwise have spent defending. There is one shared
+pool, with no separate defense allowance. Only paid attacks trigger a defense
+decision.
 
 An established route is a trail above the adjustable traffic-density threshold.
-Attackers wait at its border and spend energy to attack the next segment. A
-contest resolves simultaneous attacks on each targeted route segment: attacking
-effort competes against route strength and current reinforcement. Either side
-can win. A successful attack erases the defending route segment; a failed attack
-spends energy without erasing it. Colony scents and permanent sites remain.
+Attackers wait at its border and spend energy to attack the next segment. Its
+owner makes one team-level defense decision per threatened segment per turn;
+nearby friendly agents are not required. **Defend probability** is configurable
+from 0 to 1 (default 0.5):
+
+- If defense is chosen and the team can pay **Defense cost**, it pays once and
+  successfully blocks every attack targeting that segment for that turn.
+- If defense is declined, it costs nothing and supplies no resistance.
+- If defense is chosen but unaffordable, it fails and charges no defense energy.
+
+Without a funded defense, paid attackers erase the segment. Route strength does
+not provide free passive resistance. Attack energy is spent even when defense
+blocks the attack. Paid defense prevents attack damage; ordinary evaporation
+and diffusion still apply. Colony scents and permanent sites remain.
 
 The sidebar controls energy, movement, scent, and combat. **Space** pauses,
 **N** advances one turn, and **S / L** saves or loads controls in
 `build/bin/data/colony-settings.xml`. The statistics describe the latest sampled
-turn, not cumulative totals. Simulation speed is measured in turns; changing
+turn, not cumulative totals. Defense successes, failures, and clears count
+segments; attack counts count agents. The explore/return counts include agents
+waiting for energy. Simulation speed is measured in turns; changing
 the turns-per-frame control accelerates it.
 
 ## Build on Linux
@@ -125,7 +158,9 @@ The default build includes GPU integration checks for colony initialization,
 reproducible resets, independent team fields, pooled energy limits, terrain
 costs, combat outcomes, route erasure, exploration, independence from distant
 site positions, partial networks, intermediate-node routes, ordinary route decay,
-voluntary abandonment, local scent-guided connections, and separate rendering layers:
+voluntary abandonment, staggered return cycles, physical home arrivals, local
+shortcuts, paid probabilistic defense, independent action costs, local
+scent-guided connections, and separate rendering layers:
 
 ```bash
 ctest --test-dir build --output-on-failure

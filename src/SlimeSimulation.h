@@ -9,11 +9,13 @@ public:
     static constexpr unsigned teamCount = 25;
     static constexpr unsigned sitesPerTeam = 3;
     static constexpr unsigned agentsPerTeam = 1536;
+    static constexpr unsigned historyCapacity = 256;
 
     struct Agent {
         glm::vec4 position; // x, y, heading (radians), trip distance
         glm::uvec4 identity; // team, last visited site, previously visited site, seed
-        glm::vec4 state; // reserved, site visits, last action, unused
+        glm::vec4 state; // phase (0 explore, 1 return), site visits, action, completed cycles
+        glm::uvec4 journey; // home site, breadcrumb count, outbound actions, reserved
     };
 
     struct TeamStats {
@@ -23,7 +25,14 @@ public:
         unsigned attacking = 0;
         unsigned wins = 0;
         unsigned arrivals = 0;
-        unsigned padding[2] = {};
+        unsigned defended = 0;
+        unsigned defenseFailed = 0;
+        unsigned defenseDeclined = 0;
+        unsigned outbound = 0;
+        unsigned returning = 0;
+        unsigned homeReturns = 0;
+        unsigned shortcuts = 0;
+        unsigned padding[3] = {};
     };
 
     struct Parameters {
@@ -31,6 +40,9 @@ public:
         unsigned exploreCost = 1;
         unsigned encroachCost = 3;
         unsigned attackCost = 12;
+        unsigned defenseCost = 8;
+        unsigned explorationSteps = 96;
+        float defenseProbability = 0.5f;
         float speed = 0.65f;
         float sensorDistance = 3.0f;
         float turnAngle = 0.55f;
@@ -42,8 +54,6 @@ public:
         float diffusion = 0.12f;
         float evaporation = 0.006f;
         float routeThreshold = 3.0f;
-        float attackPower = 6.0f;
-        float defense = 1.5f;
     };
 
     void setup(int gridWidth = 320, int gridHeight = 256, unsigned seed = 1);
@@ -86,7 +96,11 @@ private:
     ofBufferObject attackBuffer;
     ofBufferObject siteBuffer;
     ofBufferObject statsBuffer;
+    ofBufferObject planBuffer;
+    ofBufferObject historyBuffer;
     ofShader movementShader;
+    ofShader combatShader;
+    ofShader applyShader;
     ofShader trailShader;
     ofShader displayShader;
     ofShader agentShader;

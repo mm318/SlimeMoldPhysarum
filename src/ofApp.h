@@ -18,9 +18,9 @@ private:
     SlimeSimulation simulation;
     ofxPanel gui;
     ofParameterGroup controls;
-    ofParameter<int> budget, exploreCost, encroachCost, attackCost, turnsPerFrame;
+    ofParameter<int> budget, exploreCost, encroachCost, attackCost, defenseCost, explorationSteps, turnsPerFrame;
     ofParameter<float> speed, scentAttraction, freshSpace, sensorDistance, trailFollowing, avoidance, exploration;
-    ofParameter<float> diffusion, evaporation, routeThreshold, attackPower, defense;
+    ofParameter<float> diffusion, evaporation, routeThreshold, defenseProbability;
     ofParameter<bool> paused, showAgents, showPheromones, showRoutes;
     std::array<SlimeSimulation::TeamStats, SlimeSimulation::teamCount> stats{};
     unsigned seed = 0;
