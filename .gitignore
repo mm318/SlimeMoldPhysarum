@@ -1,0 +1,25 @@
+/build*/
+/cmake-build-*/
+/CMakeUserPresets.json
+
+# Generated executables and saved controls.
+/bin/
+/obj/
+/.vs/
+
+# Compiled artifacts and legacy Visual Studio projects.
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.exp
+*.pdb
+*.ilk
+*.res
+*.sln
+*.vcxproj*
