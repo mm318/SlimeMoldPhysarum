@@ -1,6 +1,6 @@
 #pragma once
 
-#include "PathProblem.h"
+#include "SmaOptimizer.h"
 #include "ofMain.h"
 #include "ofxGui.h"
 
@@ -13,16 +13,22 @@ public:
 
 private:
     void reset();
+    void advance();
+    void deposit(SmaOptimizer::Position from, SmaOptimizer::Position to);
+    void updateTrailTexture();
 
     static constexpr int guiWidth = 280;
-    PathProblem pathProblem;
-    SmaOptimizer optimizer;
+    static constexpr int fieldSize = 384;
+    SmaOptimizer simulation;
     ofxPanel gui;
     ofParameterGroup controls;
     ofParameter<int> populationSize, iterationLimit, iterationsPerFrame;
     ofParameter<float> restartProbability;
-    ofParameter<bool> paused, withObstacles, showCandidates;
-    bool previousObstacles = true;
+    ofParameter<bool> paused, showTrails, showAgents, showClosest;
+    std::vector<float> density, blur;
+    ofPixels trailPixels;
+    ofTexture trailTexture;
+    bool trailsDirty = true;
     unsigned seed = 2026;
     bool singleStep = false;
 };

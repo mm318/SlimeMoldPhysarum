@@ -1,48 +1,52 @@
-# Slime Mould Algorithm: 2D Path Search
+# Slime Mould: 2D Propagation
 
-An openFrameworks visualization of the Slime Mould Algorithm (SMA), optimizing
-a route between two fixed points on a 2D surface.
+An openFrameworks animation of slime agents exploring an obstacle-free surface
+from `(0.08, 0.5)` toward food at `(0.92, 0.5)`.
 
-## Scenario
+## Simulation
 
-The unit-square surface has endpoints A `(0.08, 0.5)` and B `(0.92, 0.5)`.
-A disk at `(0.5, 0.5)` with radius `0.17` blocks the direct connection; routes
-must maintain `0.012` clearance. Disable the obstacle to test the straight-line
-optimum of length `0.84`.
+Each agent has just two position coordinates, x and y, on the unit square.
+Every agent starts at the exact same point, with a seeded random heading.
+**Each movement is at most `0.01` in Euclidean distance**, including exploratory
+turns and the final movement onto the food. The limit is per simulation step,
+not per coordinate or rendered frame. Food is `0.84` units away, so reaching it
+requires at least 84 steps. Arrived agents stop at the exact food position.
 
-Each search agent represents a complete route with eight interior waypoints at
-fixed x stations. SMA optimizes their y coordinates. The score is route length
-plus `100 + 1000 * penetration depth` per intersecting segment/obstacle pair.
-Collision checks cover entire segments, including the required clearance.
+This is a **local-motion adaptation of SMA**, rather than the original
+unconstrained optimizer. Fitness is distance to food. SMA's fitness ranking,
+`log10` weights, best-agent/peer influence, and shrinking oscillations steer
+persistent headings. A food-distance field supplies the direction toward food,
+with stronger attraction as exploration subsides. Random restarts change
+headings instead of relocating agents. All movement is bounded before it is
+recorded. The simulation ends when all agents arrive or the step limit is met.
 
-Faint lines show candidate routes. The bright line shows the best route found:
-yellow-green when feasible, orange when colliding. The sidebar reports length,
-score, iteration, seed, and convergence. Defaults: 80 agents, 600 iterations,
-restart probability `0.03`, and seed `2026`.
+Green growth shows the surface the agents actually traversed. Overlapping
+tracks build brighter golden veins; light dots mark growing tips. Deposits
+are softly blurred for an organic appearance, while exploration history remains
+visible without evaporation. The optional closest-trail overlay follows one
+agent's real trajectory from the origin. There are no precomputed connections
+or trails drawn to food before agents travel there.
 
-SMA uses fitness-ranked weights, best-so-far attraction, shrinking oscillations,
-and random restarts. This implementation follows equations 2.1–2.7 of the
-original paper, using the MATLAB reference's `log10` weights and in-place
-updates. Iterations start at one to avoid infinite `atanh`; restarts sample
-coordinates independently, and the final generated population is evaluated.
-
-The result is the best path found, with no guarantee of global optimality.
-Fixed x stations limit routes to paths that advance monotonically in x.
+The sidebar shows arrivals, closest distance, actual trail length, and progress.
+The shortest arrival trail is the shortest among the recorded successful agents;
+movement optimizes distance to food, not total trajectory length.
+Defaults: 240 agents, 1,200 steps, direction-reset probability `0.03`, and seed `2026`.
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
 | Space | Pause/resume |
-| N | Advance one iteration and pause |
+| N | Advance one simulation step and pause |
 | R | Restart with a new seed |
 | Enter | Repeat the current seed |
-| O | Toggle the obstacle |
 | S / L | Save/load controls |
 
-Changing population, iteration limit, restart probability, or the obstacle
-restarts the search with the current seed. Iterations per frame controls
-playback speed. Settings are saved to `build/bin/data/sma-settings.xml`.
+The panel toggles exploration trails, growing tips, and the closest agent's
+trail. Changing population, step limit, or direction-reset probability restarts
+from the origin with the current seed. Steps per frame controls playback speed;
+it does not increase the `0.01` movement cap per step. Settings are saved to
+`build/bin/data/propagation-settings.xml`.
 
 ## Build and run
 
@@ -71,22 +75,24 @@ Build outputs stay in `build/`; the app requires no bundled assets.
 ctest --test-dir build --output-on-failure
 ```
 
-The tests cover SMA convergence, deterministic seeds, bounds, stopping,
-restarts, collision geometry, clearance, and the empty-surface optimum.
-Three fixed seeds must produce obstacle detours within 1% of the continuous
-shortest path (two tangents joined by an arc around the clearance-inflated disk).
+Tests verify identical starting positions, two-dimensional exploration,
+Euclidean step limits throughout every recorded trajectory, local resets,
+exact food arrivals, no arrival before step 84, deterministic seeds, bounded
+positions, consistent trail lengths, and stopping/reset behavior. Both zero
+and 100% direction-reset probabilities are exercised.
 
-The optimizer and geometry use only the C++ standard library. Their tests can
-also run without openFrameworks or a display:
+The simulation uses only the C++ standard library. Its tests can also run
+without openFrameworks or a display:
 
 ```bash
-c++ -std=c++17 -O2 -Isrc tests/sma.cpp src/SmaOptimizer.cpp src/PathProblem.cpp -o /tmp/sma-tests
-/tmp/sma-tests
+c++ -std=c++17 -O2 -Isrc tests/sma.cpp src/SmaOptimizer.cpp -o /tmp/slime-tests
+/tmp/slime-tests
 ```
 
 ## Sources
 
-These sources describe the same 2020 SMA optimizer:
+These sources describe the same original 2020 SMA optimizer, which supplies
+the ranked weights and oscillation model adapted here:
 
 - [MathWorks File Exchange](https://in.mathworks.com/matlabcentral/fileexchange/76619-slime-mould-algorithm-sma-a-method-for-optimization)
 - [Authors' page, paper, and MATLAB code](https://aliasgharheidari.com/SMA.html)

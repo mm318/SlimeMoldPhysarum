@@ -4,98 +4,127 @@
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
-#include <utility>
+
+namespace {
+using Position = SmaOptimizer::Position;
+Position add(Position a, Position b) { return {a.x + b.x, a.y + b.y}; }
+Position subtract(Position a, Position b) { return {a.x - b.x, a.y - b.y}; }
+Position scale(Position value, double amount) { return {value.x * amount, value.y * amount}; }
+Position unit(Position value) {
+    const double length = std::hypot(value.x, value.y);
+    return length > 1e-12 ? scale(value, 1 / length) : Position{};
+}
+}
+
+double SmaOptimizer::distance(Position a, Position b) {
+    return std::hypot(a.x - b.x, a.y - b.y);
+}
 
 double SmaOptimizer::uniform() {
     return std::generate_canonical<double, 53>(random);
 }
 
-void SmaOptimizer::reset(const std::vector<Bound>& newBounds, Objective newObjective,
-                         const Settings& newSettings, std::uint32_t seed) {
-    if (newBounds.empty() || !newObjective || newSettings.population < 2 ||
-        newSettings.iterations == 0 || !std::isfinite(newSettings.restartProbability) ||
+SmaOptimizer::Position SmaOptimizer::randomDirection() {
+    const double angle = uniform() * 2 * std::acos(-1.0);
+    return {std::cos(angle), std::sin(angle)};
+}
+
+void SmaOptimizer::reset(const Settings& newSettings, std::uint32_t seed) {
+    if (newSettings.population < 2 || newSettings.iterations == 0 ||
+        !std::isfinite(newSettings.restartProbability) ||
         newSettings.restartProbability < 0 || newSettings.restartProbability > 1)
-        throw std::invalid_argument("Invalid SMA settings, bounds, or objective");
-    for (const auto& bound : newBounds) {
-        if (!std::isfinite(bound.lower) || !std::isfinite(bound.upper) ||
-            bound.lower > bound.upper || !std::isfinite(bound.upper - bound.lower))
-            throw std::invalid_argument("SMA bounds must be finite and ordered");
-    }
-    bounds = newBounds;
-    objective = std::move(newObjective);
+        throw std::invalid_argument("Invalid SMA propagation settings");
     settings = newSettings;
     random.seed(seed);
     iteration = 0;
-    bestFitness = std::numeric_limits<double>::infinity();
-    bestPosition.clear();
-    history.clear();
-    population.assign(settings.population, Position(bounds.size()));
-    fitness.resize(settings.population);
-    for (auto& position : population)
-        for (std::size_t j = 0; j < bounds.size(); ++j)
-            position[j] = bounds[j].lower + uniform() * (bounds[j].upper - bounds[j].lower);
-    evaluate();
-    history.push_back(bestFitness);
-}
-
-void SmaOptimizer::evaluate() {
-    for (std::size_t i = 0; i < population.size(); ++i) {
-        fitness[i] = objective(population[i]);
-        if (!std::isfinite(fitness[i]))
-            throw std::runtime_error("SMA objective must return finite fitness");
-        if (fitness[i] < bestFitness) {
-            bestFitness = fitness[i];
-            bestPosition = population[i];
-        }
+    arrivals = closest = 0;
+    agents.assign(settings.population, Agent{});
+    for (auto& agent : agents) {
+        agent.position = start;
+        agent.heading = randomDirection();
+        agent.history.push_back(start);
     }
+    history.assign(1, distance(start, goal));
 }
 
 bool SmaOptimizer::step() {
-    if (!objective || finished()) return false;
-    std::vector<std::size_t> order(population.size());
+    if (agents.empty() || finished()) return false;
+    std::vector<double> fitness(agents.size());
+    std::vector<Position> positions;
+    positions.reserve(agents.size());
+    for (std::size_t i = 0; i < agents.size(); ++i) {
+        positions.push_back(agents[i].position);
+        fitness[i] = distance(positions.back(), goal);
+    }
+    std::vector<std::size_t> order(agents.size());
     std::iota(order.begin(), order.end(), 0);
-    std::stable_sort(order.begin(), order.end(), [this](auto a, auto b) { return fitness[a] < fitness[b]; });
+    std::stable_sort(order.begin(), order.end(), [&](auto a, auto b) { return fitness[a] < fitness[b]; });
     const double best = fitness[order.front()], worst = fitness[order.back()];
-    // Normalize before subtracting to avoid overflow. Equal fitness gives W=1.
-    const double scale = std::max({1.0, std::abs(best), std::abs(worst)});
-    const double spread = worst / scale - best / scale;
-    std::vector<Position> weights(population.size(), Position(bounds.size()));
+    std::vector<Position> weights(agents.size());
     for (std::size_t rank = 0; rank < order.size(); ++rank) {
         const auto i = order[rank];
-        const double ratio = spread > 0 ?
-            std::clamp((fitness[i] / scale - best / scale) / spread, 0.0, 1.0) : 0;
-        for (auto& weight : weights[i])
-            // log10 follows the authors' MATLAB reference implementation.
-            weight = 1 + (rank < order.size() / 2 ? 1 : -1) * uniform() * std::log10(1 + ratio);
+        const double ratio = worst > best ? (fitness[i] - best) / (worst - best) : 0;
+        const double sign = rank < order.size() / 2 ? 1 : -1;
+        weights[i] = {1 + sign * uniform() * std::log10(1 + ratio),
+                      1 + sign * uniform() * std::log10(1 + ratio)};
     }
-
-    // Start at t=1, avoiding atanh(1) at t=0; both amplitudes reach zero at T.
     const double b = 1 - double(iteration + 1) / settings.iterations;
     const double a = std::atanh(b);
-    std::uniform_int_distribution<std::size_t> choose(0, population.size() - 1);
-    for (std::size_t i = 0; i < population.size(); ++i) {
-        if (uniform() < settings.restartProbability) {
-            // Independent coordinates implement the paper's uniform bounded restart.
-            for (std::size_t j = 0; j < bounds.size(); ++j)
-                population[i][j] = bounds[j].lower + uniform() * (bounds[j].upper - bounds[j].lower);
-            continue;
+    std::uniform_int_distribution<std::size_t> choose(0, agents.size() - 1);
+    for (std::size_t i = 0; i < agents.size(); ++i) {
+        auto& agent = agents[i];
+        if (agent.arrived) continue;
+        const auto previous = agent.position;
+        if (fitness[i] <= maxStep) {
+            // Finishing the last short segment obeys the same distance limit.
+            agent.position = goal;
+            agent.arrived = true;
+            ++arrivals;
+        } else {
+            if (uniform() < settings.restartProbability) agent.heading = randomDirection();
+            const double p = std::tanh(std::abs(fitness[i] - best));
+            Position oscillation;
+            if (uniform() < p) {
+                const auto A = subtract(positions[choose(random)], previous);
+                const auto B = subtract(positions[choose(random)], previous);
+                oscillation = add(subtract(positions[order.front()], previous),
+                    {(2 * uniform() - 1) * a * (weights[i].x * A.x - B.x),
+                     (2 * uniform() - 1) * a * (weights[i].y * A.y - B.y)});
+            } else {
+                // Contract heading perturbations, rather than world coordinates.
+                oscillation = scale(agent.heading, (2 * uniform() - 1) * b);
+            }
+            // The obstacle-free distance field supplies a local food-scent
+            // direction. Persistence and random turns spread a searching front;
+            // the scent bias increases as SMA's oscillations shrink.
+            const auto scent = unit(subtract(goal, previous));
+            Position steering = add(scale(agent.heading, 1.0), scale(scent, 0.09 + 0.3 * (1 - b)));
+            steering = add(steering, scale(unit(oscillation), 0.04));
+            steering = add(steering, scale(randomDirection(), 0.12 * b));
+            agent.heading = unit(steering);
+            const double length = maxStep * (0.65 + 0.35 * uniform());
+            agent.position = add(previous, scale(agent.heading, length));
+            // Turn back into the surface at its edges instead of pinning a
+            // persistent outward heading against a clamped coordinate.
+            if (agent.position.x < 0 || agent.position.x > 1) agent.heading.x = -agent.heading.x;
+            if (agent.position.y < 0 || agent.position.y > 1) agent.heading.y = -agent.heading.y;
+            agent.position.x = std::clamp(agent.position.x, 0.0, 1.0);
+            agent.position.y = std::clamp(agent.position.y, 0.0, 1.0);
         }
-        const double p = std::tanh(std::abs(fitness[i] - bestFitness));
-        for (std::size_t j = 0; j < bounds.size(); ++j) {
-            const double vb = (2 * uniform() - 1) * a;
-            const double vc = (2 * uniform() - 1) * b;
-            const bool approach = uniform() < p;
-            const auto A = choose(random), B = choose(random);
-            // In-place population updates match the reference's agent loop.
-            const double value = approach ?
-                bestPosition[j] + vb * (weights[i][j] * population[A][j] - population[B][j]) :
-                vc * population[i][j];
-            population[i][j] = std::clamp(value, bounds[j].lower, bounds[j].upper);
-        }
+        agent.travelled += distance(previous, agent.position);
+        agent.history.push_back(agent.position);
     }
-    // Evaluate the final update too, so displayed agents and fitness always agree.
-    evaluate();
     ++iteration;
-    history.push_back(bestFitness);
+    measure();
     return true;
+}
+
+void SmaOptimizer::measure() {
+    closest = 0;
+    for (std::size_t i = 1; i < agents.size(); ++i) {
+        const double candidate = distance(agents[i].position, goal);
+        const double current = distance(agents[closest].position, goal);
+        if (candidate < current || (candidate == current && agents[i].travelled < agents[closest].travelled)) closest = i;
+    }
+    history.push_back(std::min(history.back(), distance(agents[closest].position, goal)));
 }

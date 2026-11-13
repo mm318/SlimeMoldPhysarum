@@ -26,8 +26,6 @@ set(${APP_NAME}_SOURCE_FILES
     src/ofApp.h
     src/SmaOptimizer.cpp
     src/SmaOptimizer.h
-    src/PathProblem.cpp
-    src/PathProblem.h
 )
 set(OFX_ADDONS_ACTIVE ofxGui)
 
@@ -40,7 +38,7 @@ add_custom_command(TARGET Slime_Mold POST_BUILD
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(Slime_Mold_sma_tests tests/sma.cpp src/SmaOptimizer.cpp src/PathProblem.cpp)
+    add_executable(Slime_Mold_sma_tests tests/sma.cpp src/SmaOptimizer.cpp)
     target_include_directories(Slime_Mold_sma_tests PRIVATE src)
     target_compile_features(Slime_Mold_sma_tests PRIVATE cxx_std_17)
     add_test(NAME sma COMMAND Slime_Mold_sma_tests)
