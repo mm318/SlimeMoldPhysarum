@@ -33,8 +33,11 @@ set(OFX_ADDONS_ACTIVE ofxGui)
 # beside the executable in the build directory.
 include("${ofxcmake_SOURCE_DIR}/modules/main.cmake")
 
-# Shader edits must reach the executable even when no C++ source needs linking.
+# Replace the generated shader directory so edits and deletions reach the app
+# even without relinking. Other runtime files, including saved controls, stay.
 add_custom_target(Slime_Mold_data ALL
+    COMMAND "${CMAKE_COMMAND}" -E remove_directory
+        "$<TARGET_FILE_DIR:Slime_Mold>/data/shadersGL3"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/data" "$<TARGET_FILE_DIR:Slime_Mold>/data"
     DEPENDS Slime_Mold

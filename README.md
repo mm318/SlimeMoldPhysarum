@@ -146,7 +146,8 @@ sudo /home/user/of_v0.12.1_linux64_gcc6_release/scripts/linux/ubuntu/install_dep
 The build compiles the openFrameworks core, the release's `ofxGui` addon, and
 the application together. Generated libraries stay in `build/lib`; the
 executable and a copy of `bin/data` (shaders) go in `build/bin`. Subsequent
-builds also copy shader edits when no C++ files require recompilation.
+builds synchronize shader edits and deletions even when no C++ files require
+recompilation. Saved control settings are preserved.
 The openFrameworks installation is left unchanged. A graphical session and an
 OpenGL 4.4-capable driver are required by the bundled GLSL 4.40 shaders. This
 ofxCMake revision supports desktop Linux. The app uses X11 (XWayland in a

@@ -2,7 +2,6 @@
 
 #include "ofMain.h"
 #include <array>
-#include <cstdint>
 
 class SlimeSimulation {
 public:
@@ -12,10 +11,10 @@ public:
     static constexpr unsigned historyCapacity = 256;
 
     struct Agent {
-        glm::vec4 position; // x, y, heading (radians), trip distance
+        glm::vec4 position; // x, y, heading (radians), std430 padding
         glm::uvec4 identity; // team, last visited site, previously visited site, seed
         glm::vec4 state; // phase (0 explore, 1 return), site visits, action, completed cycles
-        glm::uvec4 journey; // home site, breadcrumb count, outbound actions, reserved
+        glm::uvec4 journey; // home site, breadcrumb count, outbound actions, std430 padding
     };
 
     struct TeamStats {
@@ -32,7 +31,7 @@ public:
         unsigned returning = 0;
         unsigned homeReturns = 0;
         unsigned shortcuts = 0;
-        unsigned padding[3] = {};
+        unsigned padding[3] = {}; // Keep each team's GPU record on a 64-byte boundary.
     };
 
     struct Parameters {

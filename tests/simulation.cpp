@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
-#include <queue>
 #include <stdexcept>
 
 namespace {

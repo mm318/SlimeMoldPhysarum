@@ -43,7 +43,6 @@ void main() {
             float traveled = distance(plan.step.xy, agent.position.xy);
             agent.position.xy = plan.step.xy;
             agent.position.z = plan.step.z;
-            agent.position.w += traveled;
             if (traveled > 0.0001) {
                 atomicAdd(contributions[cellAt(agent.position.xy) * TEAM_COUNT + int(team)].w, 4u);
                 if (!returning && agent.journey.y < HISTORY_CAPACITY) {
@@ -62,7 +61,6 @@ void main() {
                 uint visited = team * 3u + colony;
                 if (visited == agent.identity.y || sites[visited].z == 0.0 || distance(agent.position.xy, sites[visited].xy) > 2.0) continue;
                 agent.state.y += 1.0;
-                agent.position.w = 0.0;
                 agent.identity.z = agent.identity.y;
                 agent.identity.y = visited;
                 agent.state.x = 1.0; // A discovered connection also triggers a trip home.

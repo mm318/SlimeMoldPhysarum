@@ -60,7 +60,6 @@ void SlimeSimulation::reset(unsigned seed) {
     std::uniform_int_distribution<unsigned> countDistribution(2, 3);
     std::vector<Agent> agents;
     agents.reserve(teamCount * agentsPerTeam);
-    std::vector<glm::vec2> history(teamCount * agentsPerTeam * historyCapacity, glm::vec2(0));
     const float margin = 5.0f;
     const float separation = std::min(width, height) * 0.20f;
 
@@ -96,12 +95,13 @@ void SlimeSimulation::reset(unsigned seed) {
             agents.push_back({glm::vec4(position, heading, 0.0f),
                               glm::uvec4(team, team * 3 + home, team * 3 + home, random()),
                               glm::vec4(0.0f), glm::uvec4(team * 3 + home, 1, 0, 0)});
-            history[(agents.size() - 1) * historyCapacity] = glm::vec2(sites[team * 3 + home]);
         }
     }
 
     agentBuffer.allocate(agents, GL_DYNAMIC_DRAW);
-    historyBuffer.allocate(history, GL_DYNAMIC_DRAW);
+    // The planning/apply passes write each breadcrumb before it enters the
+    // agent's valid prefix, so no CPU-side history initialization is needed.
+    historyBuffer.allocate(static_cast<GLsizeiptr>(teamCount) * agentsPerTeam * historyCapacity * sizeof(glm::vec2), GL_DYNAMIC_DRAW);
     planBuffer.allocate(teamCount * agentsPerTeam * (sizeof(glm::vec4) + sizeof(glm::uvec4)), GL_DYNAMIC_DRAW);
     siteBuffer.allocate(sizeof(sites), sites.data(), GL_STATIC_DRAW);
     statsBuffer.allocate(sizeof(TeamStats) * teamCount, GL_DYNAMIC_DRAW);
@@ -130,7 +130,6 @@ void SlimeSimulation::clearBuffer(ofBufferObject& buffer) {
 void SlimeSimulation::bindBuffers() {
     agentBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 0);
     trailBuffers[current].bindBase(GL_SHADER_STORAGE_BUFFER, 1);
-    trailBuffers[1 - current].bindBase(GL_SHADER_STORAGE_BUFFER, 2);
     contributionBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 3);
     siteBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 4);
     statsBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 5);

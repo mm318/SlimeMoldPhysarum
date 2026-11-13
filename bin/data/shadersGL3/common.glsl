@@ -4,15 +4,15 @@ const float MAX_SCENT = 16.0;
 const uint HISTORY_CAPACITY = 256u;
 
 struct Agent {
-    vec4 position;
+    vec4 position; // xyz: location/heading; w: std430 padding
     uvec4 identity;
     vec4 state;
-    uvec4 journey;
+    uvec4 journey; // xyz: home/count/age; w: std430 padding
 };
 
 struct Plan {
-    vec4 step; // proposed x, y, heading, unused
-    uvec4 action; // kind (0 wait, 1 explore, 2 encroach, 3 attack), paid, return waypoint, unused
+    vec4 step; // proposed x, y, heading, std430 padding
+    uvec4 action; // kind (0 wait, 1 explore, 2 encroach, 3 attack), paid, return waypoint, std430 padding
 };
 
 struct TeamStats {
