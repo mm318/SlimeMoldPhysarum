@@ -1,7 +1,7 @@
 # Physarum: Growing Flow Networks
 
 An openFrameworks simulation of a branching transport graph, approximating the
-behavior shown in [One Seed Builds a Living Network](https://www.youtube.com/shorts/PGH4C2rPiaM)
+behavior shown in [One Seed Builds a Living Network][growth-video]
 by Rule & Flow. The creator describes a local-flow graph simulation; their exact
 code and growth rules are not available. This implementation is an inferred
 model, not a reproduction of their source code.
@@ -9,8 +9,8 @@ model, not a reproduction of their source code.
 ## Scenario
 
 The graph begins with a single seed at food A `(0.08, 0.5)` and no edges. Food B
-is at `(0.92, 0.5)`. Both are permanent nutrient sites. The default six-food scene
-adds four sources across the unit square, as a comparison with the video.
+is at `(0.92, 0.5)`. Both are permanent nutrient sites. The default six-food
+scene adds four sources across the unit square, as a comparison with the video.
 Disable **Video scene: six foods** to use only A and B. There are no obstacles.
 
 Every branch extension and merging connection is at most **`0.01` units in
@@ -23,6 +23,10 @@ The graph never begins with a hidden skeleton or a precomputed route.
 Persistent tips extend short segments, occasionally sprout side branches, and
 have a modest directional bias toward unreached food. A crossing splits an
 existing tube into a real junction; nearby tips can also join existing nodes.
+These contacts close loops, forming a mesh with alternative conducting routes.
+The growing front can finish when it fuses with a trunk; both sides of the loop
+remain in the hydraulic network. Food approaches and nearby-node joins also
+check their actual connecting segment for intervening tubes.
 Growth has no step or duration limit. The node budget counts only the current
 live network. When a tube retires, nodes with no remaining live connection are
 removed from the working graph, freeing capacity. Shared junctions remain while
@@ -33,8 +37,9 @@ adaptation continue. Blocked frontiers stop drawing exploratory growth flow, so
 unused branches can weaken. Growth resumes when pruning frees space. Surviving
 tips wait for room; if all tips die, reached food sites can launch new ones.
 
-Each tube has a length `L`, conductivity `D`, and signed flow `Q`. At every step,
-a sparse, grounded graph-Laplacian solve computes node pressures and flows:
+Each tube has a length `L`, conductivity `D`, and signed flow `Q`. At every
+step, a sparse, grounded graph-Laplacian solve computes node pressures and
+flows:
 
 ```text
 Q(a,b) = D(a,b) / L(a,b) * (pressure(a) - pressure(b))
@@ -42,10 +47,10 @@ sum(outgoing flows at a node) = supplied flow - consumed flow
 ```
 
 Food-to-food flow selects the backbone. Conductivity adapts toward the average
-response over **every connected food pair**, calculated by superposing root-to-food
-pressure solutions. The displayed pumping pair and flow direction can change
-without changing which routes receive reinforcement. Two foods use the linear
-Tero response `f(Q) = |Q|`; multiple foods use a saturating response
+response over **every connected food pair**, calculated by superposing
+root-to-food pressure solutions. The displayed pumping pair and flow direction
+can change without changing which routes receive reinforcement. Two foods use
+the linear Tero response `f(Q) = |Q|`; multiple foods use a saturating response
 `f(Q) = 2 * |Q|^1.8 / (1 + |Q|^1.8)`, normalized so `f(1) = 1`.
 
 Exploration receives a separate, limited support flow only while food remains
@@ -56,15 +61,18 @@ removed merely for starting thin. Younger routes receive no extra food-flow
 reward. This lets a shorter new route compete while an inefficient new route
 cannot replace a better established trunk just by attracting an exploratory tip.
 
-Mature food-carrying tubes can also physically shorten. A local mechanical
-relaxation reduces flow-weighted length, with food locations and growing tips
-fixed. Moves are gradual, stay within the surface, preserve the `0.01` edge
-limit, and reject new crossings. **Tube shortening** can be set to zero to
-compare against the original fixed skeleton. This is an additional geometric
-model; the reference film's fixed fine mesh selects routes without moving nodes.
+Route shortening comes from **mesh formation and hydraulic selection**. When
+growth reconnects with an existing trunk, flow divides between the old route
+and the new connection according to their resistances. Useful connections
+thicken; inefficient portions progressively lose conductivity and retire. Their
+unused nodes release capacity for further growth. Established nodes stay fixed:
+there is no geometric relaxation or string-tightening step. A shorter route can
+only emerge if local exploration actually grows the necessary connections.
+The result depends on the mesh explored; a sparse graph need not contain the
+straight-line optimum.
 
 The hydraulic solve uses Jacobi-preconditioned conjugate gradients, with a
-larger convergence budget for the conductance contrasts produced by contracting
+larger convergence budget for the conductance contrasts produced by thinning
 tubes. Flow reinforcement changes actual transport, not just the appearance.
 
 Gold strokes highlight food transport, with width mapped from conductivity;
@@ -73,16 +81,17 @@ Animated bright points follow the signed flow direction. Gray lines retain
 explored and retired branches; small points mark live graph nodes. Retired
 geometry is a separate, bounded drawing history (20,000 segments), so it does
 not consume the live-node budget or hydraulic solver capacity. The progress
-chart retains the last 4,096 samples without limiting simulation duration. Food rings
-brighten when reached. The sidebar reports graph size, connected tube length,
-the food-carrying backbone length, and its shortest A-B route. Weak scout
-connections do not count as an established backbone route. Dijkstra's algorithm
-is used only to report that route length, not to guide growth or reinforcement.
+chart retains the last 4,096 samples without limiting simulation duration.
+Food rings brighten when reached. The sidebar reports graph size, connected
+tube length, the food-carrying backbone length, and its shortest A-B route.
+Weak scout connections do not count as an established backbone route.
+Dijkstra's algorithm is used only to report that route length, not to guide
+growth or reinforcement.
 
-Growth, exploration support, and geometric shortening are custom choices for
-this visualization. This is neither the 2020 numerical SMA optimizer nor a biological
-validation or proof of fractal scaling. Multi-food adaptation can favor shared
-routes over the shortest route between one particular food pair.
+Growth and exploration support are custom choices for this visualization.
+This is neither the 2020 numerical SMA optimizer nor a biological validation
+or proof of fractal scaling. Multi-food adaptation can favor shared routes
+over the shortest route between one particular food pair.
 
 ## Controls
 
@@ -95,16 +104,17 @@ routes over the shortest route between one particular food pair.
 | S / L | Save/load controls |
 
 The panel selects two or six foods, toggles graph/flow layers, and controls
-branching, nutrient bias, live-node budget, tip limit, tube shortening, and
+branching, nutrient bias, live-node budget, tip limit, and
 hydraulic adaptation.
 **Max growing tips** is adjustable live from **1 to 128** without resetting the
 network. Lowering it immediately removes excess frontiers; raising it permits
 additional forks and food-site restarts. Other model changes restart growth;
-visibility and playback speed preserve state. Settings are saved to `build/bin/data/graph-settings.xml`.
+visibility and playback speed preserve state. Settings are saved to
+`build/bin/data/graph-settings.xml`.
 
 Defaults: seed `2026`, continuous simulation, 1,800 live nodes, and 18 growing
-tips. Pause manually with Space. The `0.01` extension limit applies to each simulation step,
-independently of the steps-per-frame playback setting.
+tips. Pause manually with Space. The `0.01` extension limit applies to each
+simulation step, independently of the steps-per-frame playback setting.
 
 ## Build and run
 
@@ -135,11 +145,13 @@ ctest --test-dir build --output-on-failure
 
 Tests check a controlled parallel-tube network against analytic flows, reverse
 food supply roles, and verify that reinforcement moves transport to the shorter
-competing route regardless of which started thicker. They compare mature
-trunk shortening against a fixed skeleton and independently check food-pair
-averaging. An aggressive continuous-exploration fixture also verifies that
-the two-food backbone stays near the straight-line optimum and settles instead
-of cycling through inefficient new branches. End-to-end checks cover node-level mass conservation, physical
+competing route regardless of which started thicker. Controlled meshes use the
+production adaptation rule to verify that both routes initially coexist and
+the inefficient side eventually retires without moving nodes. Tests also
+independently check food-pair averaging. An aggressive continuous-exploration
+fixture verifies that the two-food backbone settles instead of cycling through
+inefficient new branches. End-to-end checks cover fixed established positions,
+node-level mass conservation, physical
 flow/conductivity consistency, local growth and junction lengths, connected
 working topology, exact food discovery, retained food connections, branching,
 reconnection, pruning, deterministic resets, and live-node budgets. A 5,000-step
@@ -150,17 +162,22 @@ The graph simulation uses only the C++ standard library and can be tested
 without openFrameworks or a display:
 
 ```bash
-c++ -std=c++17 -O2 -Isrc tests/physarum.cpp src/PhysarumSimulation.cpp -o /tmp/physarum-tests
+c++ -std=c++17 -O2 -Isrc tests/physarum.cpp src/PhysarumSimulation.cpp \
+    -o /tmp/physarum-tests
 /tmp/physarum-tests
 ```
 
 ## References
 
-- [Railway-network reference and model explanation](https://www.youtube.com/watch?v=Jt8qA-9z7XI).
-- [Reference video and creator description](https://www.youtube.com/shorts/PGH4C2rPiaM).
-- [Physarum Can Compute Shortest Paths](https://arxiv.org/abs/1106.0423), Bonifaci,
-  Mehlhorn, and Varma: hydraulic flow and adaptive conductance in the Tero model.
+- [Railway-network reference and model explanation][railway-video].
+- [Reference video and creator description][growth-video].
+- [Physarum Can Compute Shortest Paths](https://arxiv.org/abs/1106.0423),
+  Bonifaci, Mehlhorn, and Varma: hydraulic flow and adaptive conductance in the
+  Tero model.
 
 Classical adaptive-conductance models operate on an existing graph. The local
 growth, bifurcation, joining, exploratory demand, rotating food supply, and
 visual presentation here are additions inferred for this project.
+
+[growth-video]: https://www.youtube.com/shorts/PGH4C2rPiaM
+[railway-video]: https://www.youtube.com/watch?v=Jt8qA-9z7XI

@@ -4,7 +4,9 @@
 #include <cmath>
 #include <iostream>
 #include <queue>
+#include <set>
 #include <stdexcept>
+#include <tuple>
 
 namespace {
 using Simulation = PhysarumSimulation;
@@ -50,40 +52,28 @@ void checkRouteFairness() {
     const std::vector<Simulation::Node> geometry{{{0, 0}}, {{0.005, 0}}, {{0.01, 0}}, {{0.005, 0.005}}};
     for (bool shortEstablished : {true, false}) {
         auto nodes = geometry;
-        const double shortD = shortEstablished ? 1 : 0.01, longD = shortEstablished ? 0.01 : 1;
+        const double shortD = shortEstablished ? 1 : 0.003, longD = shortEstablished ? 0.003 : 1;
         std::vector<Simulation::Edge> edges{{0, 1, 0.005, shortD}, {1, 2, 0.005, shortD},
                                           {0, 3, diagonal, longD}, {3, 2, diagonal, longD}};
-        for (unsigned t = 0; t < 1200; ++t) {
+        Simulation::Settings settings;
+        for (std::size_t e = 0; e < edges.size(); ++e)
+            edges[e].born = ((e < 2) != shortEstablished) ? 100 : 0;
+        for (unsigned t = 0; t < 1800; ++t) {
             require(Simulation::solveFlow(nodes, edges, {1, 0, -1, 0}) < 1e-8, "Competition fixture must conserve flow");
             if (shortEstablished)
                 require(edges[0].flow > 0.95, "A new longer route must never dethrone an established shorter route");
-            for (auto& edge : edges) edge.conductivity = std::max(1e-6, edge.conductivity +
-                0.035 * (Simulation::flowResponse(edge.flow, false) - edge.conductivity));
+            for (auto& edge : edges) edge.foodLoad = edge.foodDrive = std::abs(edge.flow);
+            Simulation::adaptTubes(edges, settings, 100 + t);
+            if (t == 30) require(std::all_of(edges.begin(), edges.end(), [](const auto& e) { return e.active; }),
+                                 "A new mesh connection must allow both routes to compete before pruning");
         }
-        require(edges[0].conductivity > 100 * edges[2].conductivity,
-                "Route efficiency must win independently of which route started thicker");
+        require(edges[0].active && edges[1].active && !edges[2].active && !edges[3].active,
+                "Hydraulic adaptation must retire the inefficient side of the mesh regardless of which route is older");
+        require(edges[0].conductivity > 100 * edges[2].conductivity && edges[0].flow > 0.99,
+                "Mesh selection must transfer real conductivity and flow to the shorter route");
+        for (std::size_t i = 0; i < nodes.size(); ++i)
+            require(nodes[i].position == geometry[i].position, "Mesh selection must not move established tube nodes");
     }
-}
-
-void checkShortening() {
-    Simulation fixed, shortening;
-    Simulation::Settings settings;
-    settings.sixFoods = false; settings.maxTips = 1; settings.branching = 0;
-    shortening.reset(settings, 2026);
-    settings.shortening = 0;
-    fixed.reset(settings, 2026);
-    for (unsigned t = 0; t < 2200; ++t) { fixed.step(); shortening.step(); }
-    require(shortening.getConnectionLength() < 0.841 &&
-            shortening.getConnectionLength() < fixed.getConnectionLength() - 0.003,
-            "Mature tubes must physically shorten, rather than preserving their original bent skeleton");
-    require(shortening.getFoods()[0].position == Simulation::start &&
-            shortening.getNodes()[shortening.getFoods()[0].node].position == Simulation::start &&
-            shortening.getNodes()[shortening.getFoods()[1].node].position == Simulation::goal,
-            "Shortening must keep both food anchors fixed");
-    for (const auto& edge : shortening.getEdges())
-        require(edge.length <= Simulation::maxStep + 1e-12, "Shortening must preserve the local edge-length limit");
-    require(shortening.getIteration() == 2200 && !shortening.getTips().empty(),
-            "Settling the backbone must not require stopping exploration");
 }
 
 void checkBackboneSettlesWhileExploring() {
@@ -121,9 +111,15 @@ void checkGrowth(bool sixFoods, unsigned seed) {
     unsigned firstGoal = 0;
     bool loop = false, branching = false;
     for (unsigned turn = 0; turn < 1200; ++turn) {
+        std::set<std::tuple<unsigned, double, double>> previousPositions;
+        for (const auto& node : simulation.getNodes())
+            previousPositions.emplace(node.born, node.position.x, node.position.y);
         require(simulation.step(), "Growth must continue until explicitly paused by its caller");
         const auto& nodes = simulation.getNodes();
         const auto& edges = simulation.getEdges();
+        for (const auto& node : nodes) if (node.born < turn)
+            require(previousPositions.count({node.born, node.position.x, node.position.y}),
+                    "Established nodes must remain fixed through growth, junction splitting, and mesh pruning");
         require(nodes.size() <= settings.maxNodes && simulation.getTips().size() <= settings.maxTips,
                 "Growth must respect its node and frontier budgets");
         if (simulation.getBalanceError() >= 1e-5)
@@ -322,7 +318,6 @@ int main() {
     try {
         checkHydraulics();
         checkRouteFairness();
-        checkShortening();
         checkBackboneSettlesWhileExploring();
         checkRecyclingAndContinuousGrowth();
         checkLiveTipLimit();

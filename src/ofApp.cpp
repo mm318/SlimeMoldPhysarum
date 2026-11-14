@@ -24,7 +24,6 @@ void ofApp::setup() {
     controls.add(branching.set("Branching probability", 0.055f, 0.0f, 0.2f));
     controls.add(foodBias.set("Food growth bias", 0.32f, 0.0f, 0.5f));
     controls.add(adaptation.set("Tube adaptation rate", 0.035f, 0.005f, 0.2f));
-    controls.add(shortening.set("Tube shortening", 0.3f, 0.0f, 1.0f));
     controls.add(reinforcement.set("Flow reinforcement", 1.0f, 0.0f, 2.0f));
     gui.setup(controls, "graph-settings.xml");
     reset();
@@ -36,7 +35,6 @@ PhysarumSimulation::Settings ofApp::parameters() const {
     s.maxNodes = nodeLimit; s.maxTips = tipLimit;
     s.branching = value(branching); s.foodBias = value(foodBias);
     s.adaptation = value(adaptation); s.reinforcement = value(reinforcement);
-    s.shortening = value(shortening);
     s.sixFoods = sixFoods;
     return s;
 }
@@ -52,7 +50,7 @@ void ofApp::update() {
     const auto& current = simulation.getSettings();
     if (s.maxNodes != current.maxNodes ||
         s.branching != current.branching || s.foodBias != current.foodBias ||
-        s.adaptation != current.adaptation || s.reinforcement != current.reinforcement || s.shortening != current.shortening || s.sixFoods != current.sixFoods)
+        s.adaptation != current.adaptation || s.reinforcement != current.reinforcement || s.sixFoods != current.sixFoods)
         reset();
     else if (s.maxTips != current.maxTips) simulation.setTipLimit(s.maxTips);
     if (!paused || singleStep) {

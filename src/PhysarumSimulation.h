@@ -35,7 +35,7 @@ public:
     struct Food { Position position; std::size_t node = noNode; };
     struct RetiredEdge { Position a, b; };
     struct Tip {
-        std::size_t node = 0, previous = noNode, target = noNode;
+        std::size_t node = 0, target = noNode;
         Position direction;
         unsigned age = 0, sinceBranch = 0;
         bool active = true;
@@ -47,7 +47,6 @@ public:
         double foodBias = 0.32;
         double adaptation = 0.035;
         double reinforcement = 1.0;
-        double shortening = 0.3;
         bool sixFoods = true;
     };
     static constexpr Position start{0.08, 0.5};
@@ -76,6 +75,8 @@ public:
     double getConnectionLength(bool transportOnly = false) const;
     static double distance(Position a, Position b);
     static double flowResponse(double flow, bool multipleFoods);
+    // Apply the same local tube adaptation to supplied hydraulic experiments.
+    static void adaptTubes(std::vector<Edge>& tubes, const Settings& settings, unsigned iteration);
     // Solve a supplied network too, e.g. for controlled hydraulic experiments.
     // Positive injections supply flow, negative injections consume it. Sum=0.
     // Node zero is the pressure reference. Disconnected, undriven nodes are ignored.
@@ -89,9 +90,7 @@ private:
     bool addEdge(std::size_t a, std::size_t b);
     void grow();
     bool extend(Tip& tip);
-    void adapt();
     void retire();
-    void shorten();
     void transport();
     void measure();
     Settings settings;

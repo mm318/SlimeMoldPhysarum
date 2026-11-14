@@ -62,8 +62,7 @@ void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
         s.maxTips == 0 || s.maxTips > 128 || !std::isfinite(s.branching) || s.branching < 0 || s.branching > 1 ||
         !std::isfinite(s.foodBias) || s.foodBias < 0 || s.foodBias > 1 ||
         !std::isfinite(s.adaptation) || s.adaptation <= 0 || s.adaptation > 1 ||
-        !std::isfinite(s.reinforcement) || s.reinforcement < 0 || s.reinforcement > 3 ||
-        !std::isfinite(s.shortening) || s.shortening < 0 || s.shortening > 1)
+        !std::isfinite(s.reinforcement) || s.reinforcement < 0 || s.reinforcement > 3)
         throw std::invalid_argument("Invalid growing-graph settings");
     settings = s;
     random.seed(seed);
@@ -79,7 +78,7 @@ void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
     }
     for (unsigned i = 0; i < std::min(3u, settings.maxTips); ++i) {
         const auto direction = rotate({1, 0}, (int(i) - 1) * 0.8 + (uniform() - 0.5) * 0.2);
-        tips.push_back({0, noNode, chooseTarget(0, direction), direction, 0, 0, true});
+        tips.push_back({0, chooseTarget(0, direction), direction, 0, 0, true});
     }
     injections.assign(1, 0);
     history.assign(1, distance(start, goal));
@@ -116,43 +115,55 @@ bool PhysarumSimulation::addEdge(std::size_t a, std::size_t b) {
 
 bool PhysarumSimulation::extend(Tip& tip) {
     const auto from = nodes[tip.node].position;
-    // Food is attached only when a growing tip physically reaches it.
+    std::vector<std::size_t> neighbors;
+    for (const auto& edge : edges) if (edge.active) {
+        if (edge.a == tip.node) neighbors.push_back(edge.b);
+        if (edge.b == tip.node) neighbors.push_back(edge.a);
+    }
+    const auto adjacent = [&](std::size_t node) {
+        return std::find(neighbors.begin(), neighbors.end(), node) != neighbors.end();
+    };
+    std::size_t food = noNode, destination = noNode;
+    Position next;
+    // Food approaches use the same collision checks as ordinary growth, so a
+    // tube encountered before the food also becomes a hydraulic junction.
     for (std::size_t i = 0; i < foods.size(); ++i) {
         const double d = distance(from, foods[i].position);
-        if (d > 1e-7 && d <= maxStep) {
-            const bool discovered = foods[i].node == noNode;
-            std::size_t destination = foods[i].node;
-            if (discovered) {
-                destination = nodes.size();
-                nodes.push_back({foods[i].position, nodes[tip.node].pressure, iteration, true});
-            }
-            if (addEdge(tip.node, destination)) {
-                foods[i].node = destination;
-                tip.previous = tip.node; tip.node = destination;
-                tip.target = chooseTarget(tip.node, tip.direction);
-                if (!discovered) tip.active = false;
-                return true;
-            }
-            if (discovered) nodes.pop_back();
+        if (d > 1e-7 && d <= maxStep && (foods[i].node == noNode || !adjacent(foods[i].node))) {
+            food = i; destination = foods[i].node; next = foods[i].position;
+            break;
         }
     }
     if (tip.target == noNode || foods[tip.target].node != noNode)
         tip.target = chooseTarget(tip.node, tip.direction);
     // Persistent segments, stochastic bifurcations, and a modest nutrient bias
     // supply growth; hydraulic adaptation subsequently selects the useful tubes.
-    if (tip.age % 4 == 0) {
-        tip.direction = rotate(tip.direction, (uniform() - 0.5) * 0.3);
-        if (tip.target != noNode) {
-            const auto target = unit(subtract(foods[tip.target].position, from));
-            tip.direction = unit(add(scale(tip.direction, 1 - settings.foodBias), scale(target, settings.foodBias)));
+    if (food == noNode) {
+        if (tip.age % 4 == 0) {
+            tip.direction = rotate(tip.direction, (uniform() - 0.5) * 0.3);
+            if (tip.target != noNode) {
+                const auto target = unit(subtract(foods[tip.target].position, from));
+                tip.direction = unit(add(scale(tip.direction, 1 - settings.foodBias), scale(target, settings.foodBias)));
+            }
         }
-    }
-    const double length = maxStep * (0.82 + 0.18 * uniform());
-    auto next = add(from, scale(tip.direction, length));
-    if (!inside(next)) {
-        tip.direction = rotate(tip.direction, uniform() < 0.5 ? -1.1 : 1.1);
+        const double length = maxStep * (0.82 + 0.18 * uniform());
         next = add(from, scale(tip.direction, length));
-        if (!inside(next)) return false;
+        if (!inside(next)) {
+            tip.direction = rotate(tip.direction, uniform() < 0.5 ? -1.1 : 1.1);
+            next = add(from, scale(tip.direction, length));
+            if (!inside(next)) return false;
+        }
+        // Snap first, then test the actual connecting segment for crossings.
+        // Otherwise the snap itself could pass through a tube without joining it.
+        double nearest = 0.0035;
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            if (i == tip.node || adjacent(i)) continue;
+            const double d = distance(next, nodes[i].position);
+            if (d < nearest && distance(from, nodes[i].position) <= maxStep) {
+                nearest = d; destination = i;
+            }
+        }
+        if (destination != noNode) next = nodes[destination].position;
     }
     // Anastomosis: a crossing becomes a genuine hydraulic junction. Split the
     // existing tube, preserving its conductivity, rather than drawing a crossing.
@@ -170,45 +181,37 @@ bool PhysarumSimulation::extend(Tip& tip) {
         const double u = cross(subtract(a, from), ray) / denominator;
         if (t > 1e-4 && t <= 1 && u >= 0 && u <= 1 && t < first) { first = t; hit = e; }
     }
+    const bool joining = hit != noNode || destination != noNode;
     if (hit != noNode) {
         const auto intersection = add(from, scale(ray, first));
         const auto old = edges[hit];
-        std::size_t junction;
         if (distance(intersection, nodes[old.a].position) < 1e-6 && distance(from, nodes[old.a].position) <= maxStep)
-            junction = old.a;
+            destination = old.a;
         else if (distance(intersection, nodes[old.b].position) < 1e-6 && distance(from, nodes[old.b].position) <= maxStep)
-            junction = old.b;
+            destination = old.b;
         else {
-            junction = nodes.size();
+            destination = nodes.size();
             nodes.push_back({intersection, nodes[tip.node].pressure, iteration, true});
-            edges[hit].b = junction;
+            edges[hit].b = destination;
             edges[hit].length = distance(nodes[old.a].position, intersection);
             auto tail = old;
-            tail.a = junction; tail.length = distance(intersection, nodes[old.b].position);
+            tail.a = destination; tail.length = distance(intersection, nodes[old.b].position);
             edges.push_back(tail);
         }
-        if (!addEdge(tip.node, junction)) return false;
-        tip.previous = tip.node;
-        tip.node = junction;
-        tip.active = tip.target != noNode && foods[tip.target].node == noNode;
-        return true;
     }
-    // Join a nearby existing node only if the full connecting edge is local.
-    for (std::size_t i = 0; i < nodes.size(); ++i) {
-        if (i == tip.node || i == tip.previous) continue;
-        if (distance(next, nodes[i].position) < 0.0035 && distance(from, nodes[i].position) <= maxStep) {
-            if (addEdge(tip.node, i)) {
-                tip.previous = tip.node; tip.node = i;
-                tip.active = tip.target != noNode && foods[tip.target].node == noNode;
-                return true;
-            }
-            return false;
-        }
+    if (destination == noNode) {
+        destination = nodes.size();
+        nodes.push_back({next, nodes[tip.node].pressure, iteration, true});
+        if (!addEdge(tip.node, destination)) { nodes.pop_back(); return false; }
+    } else if (!addEdge(tip.node, destination)) return false;
+    tip.node = destination;
+    if (food != noNode && nodes[destination].position == foods[food].position) {
+        foods[food].node = destination;
+        tip.target = chooseTarget(destination, tip.direction);
     }
-    const auto node = nodes.size();
-    nodes.push_back({next, nodes[tip.node].pressure, iteration, true});
-    if (!addEdge(tip.node, node)) { nodes.pop_back(); return false; }
-    tip.previous = tip.node; tip.node = node;
+    // Fusion can finish this frontier, but never deletes either side of the
+    // resulting loop. Both routes compete through subsequent hydraulic solves.
+    if (joining) tip.active = tip.target != noNode && foods[tip.target].node == noNode;
     return true;
 }
 
@@ -227,7 +230,7 @@ void PhysarumSimulation::grow() {
             auto direction = rotate(tip.direction, angle);
             const auto target = chooseTarget(tip.node, direction, tip.target);
             tip.sinceBranch = 0;
-            tips.push_back({tip.node, tip.previous, target, direction, 0, 0, true});
+            tips.push_back({tip.node, target, direction, 0, 0, true});
         }
     }
     tips.erase(std::remove_if(tips.begin(), tips.end(), [](const Tip& tip) { return !tip.active; }), tips.end());
@@ -236,14 +239,14 @@ void PhysarumSimulation::grow() {
         // disconnected nodes are introduced to seed remote exploration.
         for (const auto& food : foods) if (food.node != noNode && nodes[food.node].connected) {
             auto direction = randomDirection();
-            tips.push_back({food.node, noNode, chooseTarget(food.node, direction), direction, 0, 0, true});
+            tips.push_back({food.node, chooseTarget(food.node, direction), direction, 0, 0, true});
             if (tips.size() >= settings.maxTips) break;
         }
     }
 }
 
-void PhysarumSimulation::adapt() {
-    for (auto& edge : edges) if (edge.active && edge.born < iteration) {
+void PhysarumSimulation::adaptTubes(std::vector<Edge>& tubes, const Settings& settings, unsigned iteration) {
+    for (auto& edge : tubes) if (edge.active && edge.born < iteration) {
         // Food-to-food transport selects the backbone. Provisional frontier
         // demand can support only a thin foraging tube, never a replacement trunk.
         const double target = settings.reinforcement * edge.foodDrive + edge.explorationDrive;
@@ -288,111 +291,10 @@ void PhysarumSimulation::retire() {
     tips.erase(std::remove_if(tips.begin(), tips.end(), [&](const Tip& tip) {
         return !tip.active || remap[tip.node] == noNode;
     }), tips.end());
-    for (auto& tip : tips) {
-        tip.node = remap[tip.node];
-        if (tip.previous != noNode) tip.previous = remap[tip.previous];
-    }
+    for (auto& tip : tips) tip.node = remap[tip.node];
     for (auto& food : foods) if (food.node != noNode) food.node = remap[food.node];
     nodes.swap(liveNodes);
     edges.swap(liveEdges);
-}
-
-void PhysarumSimulation::shorten() {
-    if (settings.shortening == 0 || edges.empty()) return;
-    std::vector<std::vector<std::size_t>> incident(nodes.size());
-    for (std::size_t e = 0; e < edges.size(); ++e) {
-        incident[edges[e].a].push_back(e); incident[edges[e].b].push_back(e);
-    }
-    std::vector<bool> fixed(nodes.size());
-    fixed[0] = true;
-    for (const auto& food : foods) if (food.node != noNode) fixed[food.node] = true;
-    for (const auto& tip : tips) fixed[tip.node] = true;
-
-    // Broad-phase collision bins include the maximum body motion across all six
-    // relaxation sweeps. Shortening cannot create an unmodelled crossing/junction.
-    constexpr int resolution = 64;
-    constexpr double maxMotion = 0.0005;
-    constexpr double padding = 6 * maxMotion + 1e-6;
-    std::vector<std::vector<std::size_t>> bins(resolution * resolution);
-    const auto grid = [](double value) { return std::clamp(int(std::floor(value * resolution)), 0, resolution - 1); };
-    for (std::size_t e = 0; e < edges.size(); ++e) {
-        const auto a = nodes[edges[e].a].position, b = nodes[edges[e].b].position;
-        for (int y = grid(std::min(a.y, b.y) - padding); y <= grid(std::max(a.y, b.y) + padding); ++y)
-            for (int x = grid(std::min(a.x, b.x) - padding); x <= grid(std::max(a.x, b.x) + padding); ++x)
-                bins[y * resolution + x].push_back(e);
-    }
-    std::vector<unsigned> checked(edges.size());
-    unsigned stamp = 0;
-    const auto collides = [&](std::size_t node, std::size_t neighbor, Position a, Position b) {
-        ++stamp;
-        const auto r = subtract(b, a);
-        for (int y = grid(std::min(a.y, b.y)); y <= grid(std::max(a.y, b.y)); ++y)
-            for (int x = grid(std::min(a.x, b.x)); x <= grid(std::max(a.x, b.x)); ++x)
-                for (auto e : bins[y * resolution + x]) {
-                    if (checked[e] == stamp) continue;
-                    checked[e] = stamp;
-                    const auto& other = edges[e];
-                    if (other.a == node || other.b == node || other.a == neighbor || other.b == neighbor) continue;
-                    const auto c = nodes[other.a].position, d = nodes[other.b].position;
-                    const auto v = subtract(d, c);
-                    const double denominator = cross(r, v);
-                    if (std::abs(denominator) > 1e-14) {
-                        const double t = cross(subtract(c, a), v) / denominator;
-                        const double u = cross(subtract(c, a), r) / denominator;
-                        if (t >= -1e-9 && t <= 1 + 1e-9 && u >= -1e-9 && u <= 1 + 1e-9) return true;
-                    } else if (std::abs(cross(subtract(c, a), r)) < 1e-12) {
-                        const double length2 = dot(r, r);
-                        const double t0 = dot(subtract(c, a), r) / length2;
-                        const double t1 = dot(subtract(d, a), r) / length2;
-                        if (std::min(1.0, std::max(t0, t1)) > std::max(0.0, std::min(t0, t1)) + 1e-9) return true;
-                    }
-                }
-        return false;
-    };
-    for (int sweep = 0; sweep < 6; ++sweep) for (std::size_t i = 1; i < nodes.size(); ++i) {
-        if (fixed[i] || iteration - nodes[i].born < 40 || incident[i].size() < 2) continue;
-        const auto before = nodes[i].position;
-        Position force{};
-        double weightSum = 0, energy = 0;
-        for (auto e : incident[i]) {
-            const auto& edge = edges[e];
-            const double weight = std::sqrt(edge.foodLoad);
-            const auto neighbor = edge.a == i ? edge.b : edge.a;
-            force = add(force, scale(subtract(nodes[neighbor].position, before), weight / edge.length));
-            weightSum += weight;
-            energy += weight * edge.length;
-        }
-        if (weightSum < 0.01) continue;
-        auto move = scale(force, settings.shortening * maxStep / weightSum);
-        const double length = std::hypot(move.x, move.y);
-        if (length < 1e-9) continue;
-        if (length > maxMotion) move = scale(move, maxMotion / length);
-        for (int attempt = 0; attempt < 6; ++attempt) {
-            const auto candidate = add(before, move);
-            bool valid = inside(candidate);
-            double proposed = 0;
-            for (auto e : incident[i]) {
-                const auto& edge = edges[e];
-                const auto neighbor = edge.a == i ? edge.b : edge.a;
-                const double nextLength = distance(candidate, nodes[neighbor].position);
-                if (nextLength > maxStep + 1e-12 || nextLength < std::min(edge.length, 0.0001)) { valid = false; break; }
-                proposed += std::sqrt(edge.foodLoad) * nextLength;
-            }
-            if (valid && proposed < energy - 1e-12) {
-                for (auto e : incident[i]) {
-                    const auto& edge = edges[e];
-                    const auto neighbor = edge.a == i ? edge.b : edge.a;
-                    if (collides(i, neighbor, candidate, nodes[neighbor].position)) { valid = false; break; }
-                }
-                if (valid) {
-                    nodes[i].position = candidate;
-                    for (auto e : incident[i]) edges[e].length = distance(nodes[edges[e].a].position, nodes[edges[e].b].position);
-                    break;
-                }
-            }
-            move = scale(move, 0.5);
-        }
-    }
 }
 
 void PhysarumSimulation::transport() {
@@ -528,10 +430,9 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
 
 bool PhysarumSimulation::step() {
     if (nodes.empty()) return false;
-    adapt();
+    adaptTubes(edges, settings, iteration);
     retire();
     grow();
-    shorten();
     transport();
     ++iteration;
     measure();
