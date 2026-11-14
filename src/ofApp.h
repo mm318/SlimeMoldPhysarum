@@ -18,9 +18,9 @@ private:
     PhysarumSimulation simulation;
     ofxPanel gui;
     ofParameterGroup controls;
-    ofParameter<int> nodeLimit, tipLimit, stepsPerFrame;
+    ofParameter<int> nodeLimit, tipLimit, stepsPerFrame, selectedSlime;
     ofParameter<float> branching, foodBias, adaptation, reinforcement;
-    ofParameter<bool> paused, sixFoods, showExploration, showNodes, showTips, showFlow;
+    ofParameter<bool> paused, showExploration, showNodes, showTips, showFlow;
     unsigned seed = 2026;
     double flowClock = 0;
     bool singleStep = false;

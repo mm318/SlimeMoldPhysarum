@@ -1,43 +1,54 @@
 # Physarum: Growing Flow Networks
 
-An openFrameworks simulation of a branching transport graph, approximating the
-behavior shown in [One Seed Builds a Living Network][growth-video]
-by Rule & Flow. The creator describes a local-flow graph simulation; their exact
-code and growth rules are not available. This implementation is an inferred
-model, not a reproduction of their source code.
+An openFrameworks simulation of ten competing branching transport networks.
+Growth and hydraulic adaptation draw inspiration from
+[One Seed Builds a Living Network][growth-video] by Rule & Flow. The creator's
+exact code and growth rules are unavailable; competition and ownership here
+are custom additions to an inferred model.
 
 ## Scenario
 
-Every food starts an independent growing colony, with a permanent root and no
-edges. Food A is at `(0.08, 0.5)` and food B is at `(0.92, 0.5)`. The default
-six-food scene adds four sources across the unit square. Disable **Video scene:
-six foods** to use only A and B. There are no obstacles.
+There are exactly **ten slimes**. Each independently receives **two or three
+food sources**, chosen randomly when the scene resets. Food positions are also
+random, with spacing to keep initial roots apart. Repeating a seed reproduces
+the same food counts, positions, and growth.
+
+Every food is a permanent root belonging to one slime. Each slime has a distinct
+color shared by its foods, branches, tips, and retired trails. Labels such as
+`3B` identify food B of slime 3. Each food starts with no edges. There are no
+fixed obstacles; other slimes' live objects block exploration.
 
 Every branch extension and merging connection is at most **`0.01` units in
-Euclidean length**. Opposing fronts can meet between food sources. Colonies
-merge only through physical contact; the graph starts without a hidden
-skeleton or a precomputed route.
+Euclidean length**. Fronts belonging to the same slime can meet between its
+foods. Different slimes never share nodes, tubes, foods, or hydraulic flow.
+The graph starts without a hidden skeleton or precomputed routes.
 
 ## Graph growth and transport
 
 The default tip budget gives each food three initial tips. Persistent tips
-extend short segments, fork, and have a modest bias toward other foods.
-Separate colonies take priority when selecting a target; a tip can finish
-pursuing that target after the colonies connect. Food sites replenish missing
-frontiers in rotation, sharing the global tip cap. With fewer slots than foods,
-some foods wait for a slot. Established, food-carrying trunks can sprout lateral
-probes as slots become available.
+extend short segments, fork, and have a modest bias toward their own slime's
+other foods. Disconnected foods take priority when selecting a target; a tip
+can finish pursuing that target after its colonies connect. Food sites
+replenish frontiers in rotation, sharing their slime's tip cap. With fewer slots
+than foods, some foods wait for a slot. Established, food-carrying trunks can
+sprout lateral probes. Growth order rotates to share the global node budget.
 
-A crossing splits an existing tube into a real hydraulic junction; tips can
-also join nearby nodes. Contact merges separate colonies or closes a loop in
-an existing colony. When two exploring tips meet, both tips finish and their
-connecting paths become eligible for hydraulic adaptation. When a tip meets
-the interior of another exploring branch, only the incoming tip finishes.
-The other tip keeps growing, with protection limited to the distal portion
-beyond the new junction. The proximal paths become a transport route.
-Forks retain protection on paths still leading to surviving tips.
+Contacts obey ownership:
 
-Both routes of a loop remain available for hydraulic competition. Food
+- Same-slime tips join and both finish. Their paths enter hydraulic adaptation.
+- A tip joining its own slime's branch finishes; the other tip keeps growing.
+  Only its distal portion beyond the junction remains protected exploration.
+- Contact with a foreign tube, exploring branch, node, or food ends the incoming
+  tip without adding a connection or splitting the foreign object.
+- Two foreign tips meeting are both annihilated. Their networks stay separate.
+
+Foreign nodes and food roots use a swept contact radius of `0.0035`, so a tip
+cannot jump over a foreign point between frames. Tubes also block crossing
+segments. The terminating tip adds no final segment into the foreign object.
+Forks retain protection on paths still leading to surviving tips. Losing a tip
+releases its unshared exploring path for abandonment and eventual retirement.
+
+Within one slime, both routes of a loop remain available for competition. Food
 approaches and nearby-node joins check their actual connecting segment for
 intervening tubes, including head-on collinear contacts. Established nodes
 stay fixed.
@@ -63,17 +74,16 @@ Q(a,b) = D(a,b) / L(a,b) * (pressure(a) - pressure(b))
 sum(outgoing flows at a node) = supplied flow - consumed flow
 ```
 
-Each disconnected component has its own pressure reference and must balance
-its supplies and sinks. There is no hydraulic flow between colonies until
-they physically join. Food-to-food flow selects the backbone: conductivity
-adapts toward the average `|Q|` over **every food pair within its component**,
-using the linear response for both two and six foods. Root-to-food pressure
-solutions provide every pair's flow by superposition. Displayed pumping pairs
-and directions can change without changing reinforcement.
+Each disconnected component has its own pressure reference and balances its
+supplies and sinks. Food-to-food flow selects the backbone: conductivity adapts
+toward the average `|Q|` over **every own-food pair within its component**.
+Root-to-food pressure solutions provide every pair's flow by superposition.
+Displayed pumping pairs and directions can change without changing
+reinforcement. Cross-slime edges are rejected by the graph and flow solver.
 
 Exploring branches carry **zero flow** and create no artificial sinks. Their
 conductivity stays at `D = 0.003`, protected from hydraulic decay while they
-lead to active tips. Exploration continues after the food colonies connect,
+lead to active tips. Exploration continues after a slime's foods connect,
 including lateral probes from established trunks. It is bounded by the tip and
 live-node caps, with no age, distance, or step-count limit for a growing branch.
 
@@ -99,27 +109,24 @@ The hydraulic solve uses Jacobi-preconditioned conjugate gradients, with a
 larger convergence budget for the conductance contrasts produced by thinning
 tubes. Flow reinforcement changes actual transport, not just the appearance.
 
-Gold strokes highlight food transport, with width mapped from conductivity;
-thin green strokes show active scouts.
-Animated bright points follow the signed flow direction. Gray lines retain
-explored and retired branches; small points mark live graph nodes. Retired
-geometry is a separate, bounded drawing history (20,000 segments), so it does
-not consume the live-node budget or hydraulic solver capacity. The progress
-chart retains the last 4,096 samples without limiting simulation duration.
-Every food ring marks a permanent colony root. The sidebar reports the number
-of separate food groups, graph size, live tube length, food-carrying backbone
-length, and its shortest A-B route. One food group means all colonies are
-joined.
-Weak scout connections do not count as an established backbone route.
-Dijkstra's algorithm is used only to report that route length, not to guide
-growth or reinforcement.
+Color identifies the slime. Thick strokes show food transport, thin strokes
+show scouts, and faint trails retain exploration history. Animated bright
+points follow signed flow. Retired trails are drawing history only and do not
+block tips, consume live-node capacity, or enter hydraulic solves. History is
+bounded to 20,000 retired segments and 4,096 progress samples per slime.
 
-The chart records the closest historical gap between the A and B colonies,
-reaching zero when they join. Growth and exploration protection are custom
-choices for this visualization.
-This is neither the 2020 numerical SMA optimizer nor a biological validation
-or proof of fractal scaling. Multi-food adaptation can favor shared routes
-over the shortest route between one particular food pair.
+The sidebar lists all ten slime colors and food counts. **Inspect slime**
+selects a slime's connected-food groups, food A-B backbone length, and approach
+chart. One food group means that slime's foods are joined. Weak scout links
+do not count as established backbone routes. Dijkstra's algorithm reports
+route length without guiding growth or reinforcement. The chart records the
+closest historical gap between that slime's first two food colonies.
+
+Growth, protection, and competition are custom visualization choices. This is
+neither the 2020 numerical SMA optimizer nor biological validation or proof of
+fractal scaling. Results depend on explored connections and foreign barriers;
+three-food adaptation can favor shared routes over a particular pair's shortest
+route.
 
 ## Controls
 
@@ -131,18 +138,18 @@ over the shortest route between one particular food pair.
 | Enter | Repeat the current seed |
 | S / L | Save/load controls |
 
-The panel selects two or six foods, toggles graph/flow layers, and controls
-branching, nutrient bias, live-node budget, tip limit, and
-hydraulic adaptation.
-**Max growing tips** is adjustable live from **1 to 128** without resetting the
-network. Lowering it immediately removes excess frontiers; raising it permits
-additional forks, lateral probes, and food-site restarts. Other model changes
-restart growth; visibility and playback speed preserve state. Settings are
-saved to `build/bin/data/graph-settings.xml`.
+The panel toggles drawing layers and controls branching, nutrient bias, the
+shared live-node budget, the per-slime tip limit, and hydraulic adaptation.
+**Max tips per slime** is adjustable live from **1 to 128** without resetting
+the scene. Lowering it trims each slime independently; raising it permits forks,
+lateral probes, and food-site restarts. Changing the inspected slime,
+visibility, or playback speed preserves state. Other model changes restart
+growth. Settings are saved to `build/bin/data/graph-settings.xml`.
 
-Defaults: seed `2026`, continuous simulation, 5,000 live nodes, and 18 growing
-tips. Pause manually with Space. The `0.01` extension limit applies to each
-simulation step, independently of the steps-per-frame playback setting.
+Defaults: seed `2026`, ten slimes, continuous simulation, **5,000 total live
+nodes**, and **18 growing tips per slime**. Pause with Space. The `0.01`
+extension limit applies to each simulation step, independently of playback
+speed.
 
 ## Build and run
 
@@ -179,13 +186,14 @@ Independent pairwise solves check the production food-flow average.
 
 Controlled contacts verify that tip-to-tip fusion consumes both tips and an
 interior branch contact preserves only the other tip's distal exploring subset.
-They check zero flow in protected segments and real flow in the new trunk.
-End-to-end checks cover growth from every food, fixed node positions, physical
-step lengths, mass conservation, continued exploration, lateral probes, meshes,
-pruning, and deterministic resets. A 5,000-step regression explicitly retires
-frontiers to repeatedly reuse a 25-node capacity. Live tip-limit tests verify
-that changing the cap preserves the graph. A single-tip case checks that
-flow-free branches outlive 31 steps, connect, and rotate food origins.
+Foreign-contact cases cover head-on annihilation, exploring branches,
+established trunks, and isolated foods, checking that foreign geometry remains
+unchanged. A ten-slime run checks random food ownership, own-food targeting,
+independent tip caps, permanent sources, mass conservation, and the absence of
+cross-slime edges. Isolated fixtures check zero-flow exploration, shared forks,
+short-route competition, and junction geometry. A 5,000-step regression
+explicitly retires frontiers to repeatedly reuse a 25-node capacity. Seeded
+resets reproduce food placement, growth, and flow.
 
 The graph simulation uses only the C++ standard library and can be tested
 without openFrameworks or a display:
@@ -205,7 +213,7 @@ c++ -std=c++17 -O2 -Isrc tests/physarum.cpp src/PhysarumSimulation.cpp \
   Tero model.
 
 Classical adaptive-conductance models operate on an existing graph. The local
-growth, bifurcation, joining, exploration protection, rotating food supply, and
+growth, ownership, contact rules, protection, rotating food supply, and
 visual presentation here are additions inferred for this project.
 
 [growth-video]: https://www.youtube.com/shorts/PGH4C2rPiaM

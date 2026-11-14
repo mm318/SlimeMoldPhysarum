@@ -58,7 +58,7 @@ PhysarumSimulation::Position PhysarumSimulation::randomDirection() {
 }
 
 void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
-    if (s.maxNodes < (s.sixFoods ? 6u : 2u) || s.maxNodes > 10000 ||
+    if (s.maxNodes < 3 * slimeCount || s.maxNodes > 10000 ||
         s.maxTips == 0 || s.maxTips > 128 || !std::isfinite(s.branching) || s.branching < 0 || s.branching > 1 ||
         !std::isfinite(s.foodBias) || s.foodBias < 0 || s.foodBias > 1 ||
         !std::isfinite(s.adaptation) || s.adaptation <= 0 || s.adaptation > 1 ||
@@ -66,30 +66,55 @@ void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
         throw std::invalid_argument("Invalid growing-graph settings");
     settings = s;
     random.seed(seed);
+    foods.clear();
+    for (unsigned slime = 0; slime < slimeCount; ++slime) {
+        const unsigned count = uniform() < 0.5 ? 2 : 3;
+        for (unsigned f = 0; f < count; ++f) {
+            Position position;
+            bool placed = false;
+            for (unsigned attempt = 0; attempt < 10000 && !placed; ++attempt) {
+                position = {0.05 + 0.9 * uniform(), 0.05 + 0.9 * uniform()};
+                placed = std::none_of(foods.begin(), foods.end(), [&](const Food& food) {
+                    return distance(position, food.position) < (food.slime == slime ? 0.16 : 0.045);
+                });
+            }
+            if (!placed) throw std::runtime_error("Could not place separated food sources");
+            foods.push_back({position, noNode, slime});
+        }
+    }
+    initializeColonies();
+}
+
+void PhysarumSimulation::initializeColonies() {
     iteration = 0;
     balanceError = 0;
     nodes.clear(); parents.clear(); edges.clear(); tips.clear(); retired.clear();
     nextFood = 0;
-    tips.reserve(settings.maxTips);
-    foods = {{start, noNode}, {goal, noNode}};
-    if (settings.sixFoods) {
-        for (Position p : {Position{0.25, 0.16}, Position{0.72, 0.18},
-                           Position{0.3, 0.82}, Position{0.78, 0.8}}) foods.push_back({p, noNode});
+    slimes.clear();
+    for (const auto& food : foods) slimes.resize(std::max(slimes.size(), std::size_t(food.slime + 1)));
+    tips.reserve(settings.maxTips * slimes.size());
+    for (std::size_t f = 0; f < foods.size(); ++f) {
+        auto& food = foods[f];
+        food.node = addNode(food.position, 0, food.slime);
+        slimes[food.slime].foods.push_back(f);
     }
-    for (auto& food : foods) food.node = addNode(food.position);
     for (unsigned fan = 0; fan < 3; ++fan)
-        for (std::size_t f = 0; f < foods.size() && tips.size() < settings.maxTips; ++f)
-            launchFoodTip(f, fan);
+        for (std::size_t f = 0; f < foods.size(); ++f)
+            if (countTips(foods[f].slime) < settings.maxTips) launchFoodTip(f, fan);
     nextFood = tips.size() % foods.size();
     injections.assign(nodes.size(), 0);
-    history.assign(1, distance(start, goal));
+    for (auto& slime : slimes) slime.history.assign(1, slime.foods.size() >= 2
+        ? distance(foods[slime.foods[0]].position, foods[slime.foods[1]].position) : 0);
 }
 
 void PhysarumSimulation::setTipLimit(unsigned limit) {
     if (limit == 0 || limit > 128) throw std::invalid_argument("Tip limit must be between 1 and 128");
     settings.maxTips = limit;
-    tips.reserve(limit);
-    if (tips.size() > limit) tips.resize(limit);
+    tips.reserve(limit * slimes.size());
+    std::vector<unsigned> counts(slimes.size());
+    tips.erase(std::remove_if(tips.begin(), tips.end(), [&](const Tip& tip) {
+        return counts[nodes[tip.node].slime]++ >= limit;
+    }), tips.end());
     if (!nodes.empty()) { updateExploration(); transport(); }
 }
 
@@ -100,16 +125,23 @@ std::size_t PhysarumSimulation::component(std::size_t node) const {
 
 void PhysarumSimulation::rebuildComponents() { parents = components(adjacency(nodes, edges)); }
 
-std::size_t PhysarumSimulation::addNode(Position position, double pressure) {
+std::size_t PhysarumSimulation::addNode(Position position, double pressure, unsigned slime) {
     const auto index = nodes.size();
-    nodes.push_back({position, pressure, iteration});
+    nodes.push_back({position, pressure, iteration, slime});
     parents.push_back(index);
     return index;
 }
 
+unsigned PhysarumSimulation::countTips(unsigned slime) const {
+    return std::count_if(tips.begin(), tips.end(), [&](const Tip& tip) {
+        return tip.active && nodes[tip.node].slime == slime;
+    });
+}
+
 void PhysarumSimulation::launchFoodTip(std::size_t food, unsigned fan) {
     Position center{};
-    for (const auto& site : foods) center = add(center, scale(site.position, 1.0 / foods.size()));
+    const auto& sources = slimes[foods[food].slime].foods;
+    for (auto f : sources) center = add(center, scale(foods[f].position, 1.0 / sources.size()));
     auto direction = iteration == 0
         ? rotate(unit(subtract(center, foods[food].position)), (int(fan) - 1) * 0.8 + (uniform() - 0.5) * 0.2)
         : randomDirection();
@@ -120,10 +152,10 @@ void PhysarumSimulation::launchFoodTip(std::size_t food, unsigned fan) {
 void PhysarumSimulation::replenishTips() {
     std::vector<unsigned> counts(foods.size());
     for (const auto& tip : tips) ++counts[tip.food];
-    for (std::size_t i = 0; i < foods.size() && tips.size() < settings.maxTips; ++i) {
+    for (std::size_t i = 0; i < foods.size(); ++i) {
         const auto food = nextFood;
         nextFood = (nextFood + 1) % foods.size();
-        if (counts[food] == 0) { launchFoodTip(food); ++counts[food]; }
+        if (counts[food] == 0 && countTips(foods[food].slime) < settings.maxTips) { launchFoodTip(food); ++counts[food]; }
     }
 }
 
@@ -131,8 +163,12 @@ std::size_t PhysarumSimulation::chooseTarget(std::size_t node, Position directio
     std::size_t selected = noNode;
     double best = -1e30;
     const auto root = component(node);
-    const bool separate = std::any_of(foods.begin(), foods.end(), [&](const Food& food) { return component(food.node) != root; });
+    const auto slime = nodes[node].slime;
+    const bool separate = std::any_of(foods.begin(), foods.end(), [&](const Food& food) {
+        return food.slime == slime && component(food.node) != root;
+    });
     for (std::size_t i = 0; i < foods.size(); ++i) {
+        if (foods[i].slime != slime) continue;
         if ((separate && component(foods[i].node) == root) || distance(nodes[node].position, foods[i].position) < 2 * maxStep) continue;
         const auto delta = subtract(foods[i].position, nodes[node].position);
         const double score = dot(direction, unit(delta)) + 0.1 / (0.1 + distance(nodes[node].position, foods[i].position)) -
@@ -143,6 +179,7 @@ std::size_t PhysarumSimulation::chooseTarget(std::size_t node, Position directio
 }
 
 bool PhysarumSimulation::addEdge(std::size_t a, std::size_t b) {
+    if (nodes[a].slime != nodes[b].slime) return false;
     const double length = distance(nodes[a].position, nodes[b].position);
     if (a == b || length < 1e-7 || length > maxStep + 1e-12) return false;
     for (const auto& edge : edges) if (edge.active &&
@@ -156,6 +193,7 @@ bool PhysarumSimulation::addEdge(std::size_t a, std::size_t b) {
 
 bool PhysarumSimulation::extend(Tip& tip) {
     const auto from = nodes[tip.node].position;
+    const auto slime = nodes[tip.node].slime;
     std::vector<std::size_t> neighbors;
     for (const auto& edge : edges) if (edge.active) {
         if (edge.a == tip.node) neighbors.push_back(edge.b);
@@ -169,6 +207,7 @@ bool PhysarumSimulation::extend(Tip& tip) {
     // Food approaches use the same collision checks as ordinary growth, so a
     // tube encountered before the food also becomes a hydraulic junction.
     for (std::size_t i = 0; i < foods.size(); ++i) {
+        if (foods[i].slime != slime) continue;
         const double d = distance(from, foods[i].position);
         if (d > 1e-7 && d <= maxStep && !adjacent(foods[i].node)) {
             food = i; destination = foods[i].node; next = foods[i].position;
@@ -197,7 +236,7 @@ bool PhysarumSimulation::extend(Tip& tip) {
         }
         // Snap first, then test the actual connecting segment for crossings.
         // Otherwise the snap itself could pass through a tube without joining it.
-        double nearest = 0.0035;
+        double nearest = contactRadius;
         for (std::size_t i = 0; i < nodes.size(); ++i) {
             if (i == tip.node || adjacent(i)) continue;
             const double d = distance(next, nodes[i].position);
@@ -229,6 +268,29 @@ bool PhysarumSimulation::extend(Tip& tip) {
         }
         if (t > 1e-4 && t <= 1 && u >= 0 && u <= 1 && t < first) { first = t; hit = e; }
     }
+    // Foreign food/nodes/tips are swept obstacles too, including isolated food
+    // roots and head-on encounters that do not cross a tube's centerline.
+    bool foreignNode = false;
+    const double length2 = dot(ray, ray);
+    for (const auto& node : nodes) if (node.slime != slime) {
+        const auto offset = subtract(from, node.position);
+        const double c = dot(offset, offset) - contactRadius * contactRadius;
+        const double b = dot(offset, ray);
+        const double discriminant = b * b - length2 * c;
+        if (discriminant < 0) continue;
+        const double t = c <= 0 ? 0 : (-b - std::sqrt(discriminant)) / length2;
+        if (t >= 0 && t <= 1 && t < first) { first = t; foreignNode = true; }
+    }
+    if (foreignNode || (hit != noNode && nodes[edges[hit].a].slime != slime) ||
+        (hit == noNode && destination != noNode && nodes[destination].slime != slime)) {
+        const auto contact = first <= 1 ? add(from, scale(ray, first)) : next;
+        tip.active = false;
+        for (auto& other : tips) if (other.active && nodes[other.node].slime != slime &&
+            distance(nodes[other.node].position, contact) <= contactRadius + 1e-10) other.active = false;
+        // Termination never adds an edge, splits the foreign tube, or merges
+        // ownership. Its former exploring path can retire as an abandoned stub.
+        return true;
+    }
     const bool joining = hit != noNode || destination != noNode;
     if (hit != noNode) {
         const auto intersection = add(from, scale(ray, first));
@@ -238,7 +300,7 @@ bool PhysarumSimulation::extend(Tip& tip) {
         else if (distance(intersection, nodes[old.b].position) < 1e-6 && distance(from, nodes[old.b].position) <= maxStep)
             destination = old.b;
         else {
-            destination = addNode(intersection, nodes[tip.node].pressure);
+            destination = addNode(intersection, nodes[tip.node].pressure, slime);
             parents[destination] = component(old.a);
             edges[hit].b = destination;
             edges[hit].length = distance(nodes[old.a].position, intersection);
@@ -248,7 +310,7 @@ bool PhysarumSimulation::extend(Tip& tip) {
         }
     }
     if (destination == noNode) {
-        destination = addNode(next, nodes[tip.node].pressure);
+        destination = addNode(next, nodes[tip.node].pressure, slime);
         if (!addEdge(tip.node, destination)) { nodes.pop_back(); parents.pop_back(); return false; }
     } else if (!addEdge(tip.node, destination)) return false;
     tip.node = destination;
@@ -268,12 +330,14 @@ void PhysarumSimulation::grow() {
     // Pruning can release capacity and let surviving frontiers resume later.
     if (nodes.size() >= settings.maxNodes) return;
     const std::size_t count = tips.size();
-    for (std::size_t i = 0; i < count && nodes.size() < settings.maxNodes; ++i) {
+    const auto first = count ? iteration % count : 0;
+    for (std::size_t offset = 0; offset < count && nodes.size() < settings.maxNodes; ++offset) {
+        const auto i = (first + offset) % count;
         auto& tip = tips[i];
         if (!tip.active) continue;
         if (!extend(tip)) { tip.active = false; continue; }
         ++tip.age; ++tip.sinceBranch;
-        if (tip.active && tip.sinceBranch >= 6 && tips.size() < settings.maxTips && uniform() < settings.branching) {
+        if (tip.active && tip.sinceBranch >= 6 && countTips(nodes[tip.node].slime) < settings.maxTips && uniform() < settings.branching) {
             const double angle = (uniform() < 0.5 ? -1 : 1) * (0.55 + 0.35 * uniform());
             auto direction = rotate(tip.direction, angle);
             const auto target = chooseTarget(tip.node, direction, tip.target);
@@ -283,9 +347,13 @@ void PhysarumSimulation::grow() {
     }
     tips.erase(std::remove_if(tips.begin(), tips.end(), [](const Tip& tip) { return !tip.active; }), tips.end());
     // Nourished trunks can launch lateral probes between existing food routes.
-    if (tips.size() < settings.maxTips && !edges.empty() && uniform() < settings.branching) {
+    for (unsigned slime = 0; slime < slimes.size(); ++slime) if (countTips(slime) < settings.maxTips && uniform() < settings.branching) {
+        std::vector<std::size_t> candidates;
+        for (std::size_t e = 0; e < edges.size(); ++e)
+            if (nodes[edges[e].a].slime == slime && edges[e].foodLoad >= 0.01) candidates.push_back(e);
+        if (candidates.empty()) continue;
         for (unsigned attempt = 0; attempt < 8; ++attempt) {
-            const auto& edge = edges[std::size_t(uniform() * edges.size())];
+            const auto& edge = edges[candidates[std::size_t(uniform() * candidates.size())]];
             const auto node = uniform() < 0.5 ? edge.a : edge.b;
             if (edge.foodLoad < 0.01 || iteration - nodes[node].born < 40 ||
                 std::any_of(tips.begin(), tips.end(), [&](const Tip& tip) { return distance(nodes[tip.node].position, nodes[node].position) < 0.03; })) continue;
@@ -393,7 +461,7 @@ void PhysarumSimulation::retire() {
             tube.a = remap[edge.a]; tube.b = remap[edge.b];
             liveEdges.push_back(tube);
         } else {
-            retired.push_back({nodes[edge.a].position, nodes[edge.b].position});
+            retired.push_back({nodes[edge.a].position, nodes[edge.b].position, nodes[edge.a].slime});
             if (retired.size() > retiredHistoryLimit) retired.pop_front();
         }
     }
@@ -480,6 +548,7 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
     if (points.empty() || supply.size() != points.size()) throw std::invalid_argument("Invalid flow network");
     for (const auto& edge : tubes)
         if (edge.a >= points.size() || edge.b >= points.size() || edge.a == edge.b ||
+            points[edge.a].slime != points[edge.b].slime ||
             !std::isfinite(edge.length) || edge.length <= 0 ||
             !std::isfinite(edge.conductivity) || edge.conductivity <= 0)
             throw std::invalid_argument("Invalid tube geometry or conductivity");
@@ -491,18 +560,24 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
     std::vector<std::size_t> unknowns;
     std::vector<double> diagonal(n, 1), x(n), rhs = supply, r(n), z(n), direction(n), product(n);
     std::vector<double> sum(n);
+    std::vector<bool> driven(n);
     for (std::size_t i = 0; i < n; ++i) {
         if (!std::isfinite(supply[i])) throw std::invalid_argument("Flow injections must be finite");
         sum[roots[i]] += supply[i];
-        if (roots[i] != i) {
+        driven[roots[i]] = driven[roots[i]] || supply[i] != 0;
+    }
+    for (auto total : sum) if (std::abs(total) > 1e-8)
+        throw std::invalid_argument("Flow supply must balance demand within each component");
+    // A food-pair basis solve drives one component. Other components have the
+    // exact zero-pressure solution and need no conjugate-gradient iterations.
+    for (std::size_t i = 0; i < n; ++i) {
+        if (driven[roots[i]] && roots[i] != i) {
             unknowns.push_back(i);
             diagonal[i] = 0;
             for (const auto& neighbor : neighbors[i]) diagonal[i] += neighbor.second;
             x[i] = points[i].pressure - points[roots[i]].pressure;
         } else rhs[i] = 0;
     }
-    for (auto total : sum) if (std::abs(total) > 1e-8)
-        throw std::invalid_argument("Flow supply must balance demand within each component");
     auto apply = [&](const std::vector<double>& input, std::vector<double>& output) {
         for (auto i : unknowns) {
             output[i] = diagonal[i] * input[i];
@@ -563,21 +638,31 @@ bool PhysarumSimulation::step() {
 }
 
 void PhysarumSimulation::measure() {
-    double closest = history.back();
-    const auto a = component(foods[0].node), b = component(foods[1].node);
-    if (a == b) closest = 0;
-    else if (closest > 0)
-        for (std::size_t i = 0; i < nodes.size(); ++i) if (component(i) == a)
-            for (std::size_t j = 0; j < nodes.size(); ++j) if (component(j) == b)
-                closest = std::min(closest, distance(nodes[i].position, nodes[j].position));
-    history.push_back(closest);
-    if (history.size() > progressHistoryLimit) history.pop_front();
+    std::vector<std::vector<std::size_t>> groups(nodes.size());
+    for (std::size_t i = 0; i < nodes.size(); ++i) groups[component(i)].push_back(i);
+    for (auto& slime : slimes) {
+        double closest = slime.history.back();
+        if (slime.foods.size() >= 2) {
+            const auto a = component(foods[slime.foods[0]].node), b = component(foods[slime.foods[1]].node);
+            if (a == b) closest = 0;
+            else if (closest > 0)
+                for (auto i : groups[a]) for (auto j : groups[b])
+                    closest = std::min(closest, distance(nodes[i].position, nodes[j].position));
+        }
+        slime.history.push_back(closest);
+        if (slime.history.size() > progressHistoryLimit) slime.history.pop_front();
+    }
 }
-unsigned PhysarumSimulation::getFoodGroups() const {
+unsigned PhysarumSimulation::getFoodGroups(std::size_t slime) const {
     std::vector<std::size_t> roots;
-    for (const auto& food : foods) roots.push_back(component(food.node));
+    for (const auto& food : foods) if (slime == noNode || food.slime == slime) roots.push_back(component(food.node));
     std::sort(roots.begin(), roots.end());
     return std::unique(roots.begin(), roots.end()) - roots.begin();
+}
+unsigned PhysarumSimulation::getJoinedSlimes() const {
+    unsigned joined = 0;
+    for (std::size_t slime = 0; slime < slimes.size(); ++slime) joined += getFoodGroups(slime) == 1;
+    return joined;
 }
 unsigned PhysarumSimulation::getActiveEdges() const {
     return std::count_if(edges.begin(), edges.end(), [](const Edge& edge) { return edge.active; });
@@ -593,13 +678,16 @@ double PhysarumSimulation::getTransportLength() const {
         length += edge.length;
     return length;
 }
-double PhysarumSimulation::getConnectionLength(bool transportOnly) const {
-    if (foods.size() < 2 || component(foods[0].node) != component(foods[1].node))
+double PhysarumSimulation::getConnectionLength(bool transportOnly, unsigned slime) const {
+    const auto& sources = slimes.at(slime).foods;
+    if (sources.size() < 2) return std::numeric_limits<double>::infinity();
+    const auto start = foods[sources[0]].node, goal = foods[sources[1]].node;
+    if (component(start) != component(goal))
         return std::numeric_limits<double>::infinity();
     std::vector<double> lengths(nodes.size(), std::numeric_limits<double>::infinity());
     using Entry = std::pair<double, std::size_t>;
     std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> queue;
-    lengths[foods[0].node] = 0; queue.push({0, foods[0].node});
+    lengths[start] = 0; queue.push({0, start});
     std::vector<std::vector<std::pair<std::size_t, double>>> neighbors(nodes.size());
     for (const auto& edge : edges) if (edge.active &&
         (!transportOnly || (edge.foodLoad >= 0.01 && edge.conductivity >= 0.002))) {
@@ -607,7 +695,7 @@ double PhysarumSimulation::getConnectionLength(bool transportOnly) const {
     }
     while (!queue.empty()) {
         const auto [length, node] = queue.top(); queue.pop();
-        if (node == foods[1].node) return length;
+        if (node == goal) return length;
         if (length > lengths[node]) continue;
         for (const auto& neighbor : neighbors[node]) if (length + neighbor.second < lengths[neighbor.first]) {
             lengths[neighbor.first] = length + neighbor.second;

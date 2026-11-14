@@ -19,6 +19,7 @@ public:
         Position position;
         double pressure = 0;
         unsigned born = 0;
+        unsigned slime = 0;
     };
     enum class TubeState { Exploring, Established, Abandoned };
     struct Edge {
@@ -32,8 +33,9 @@ public:
         unsigned weakSteps = 0;
         TubeState state = TubeState::Established;
     };
-    struct Food { Position position; std::size_t node = noNode; };
-    struct RetiredEdge { Position a, b; };
+    struct Food { Position position; std::size_t node = noNode; unsigned slime = 0; };
+    struct RetiredEdge { Position a, b; unsigned slime = 0; };
+    struct Slime { std::vector<std::size_t> foods; std::deque<double> history; };
     struct Tip {
         std::size_t node = 0, target = noNode, food = 0;
         Position direction;
@@ -47,11 +49,10 @@ public:
         double foodBias = 0.32;
         double adaptation = 0.035;
         double reinforcement = 1.0;
-        bool sixFoods = true;
     };
-    static constexpr Position start{0.08, 0.5};
-    static constexpr Position goal{0.92, 0.5};
+    static constexpr unsigned slimeCount = 10;
     static constexpr double maxStep = 0.01;
+    static constexpr double contactRadius = 0.0035;
     static constexpr unsigned pruningDelay = 24;
     static constexpr std::size_t retiredHistoryLimit = 20000;
     static constexpr std::size_t progressHistoryLimit = 4096;
@@ -66,14 +67,16 @@ public:
     const std::deque<RetiredEdge>& getRetiredEdges() const { return retired; }
     const std::vector<Tip>& getTips() const { return tips; }
     const std::vector<Food>& getFoods() const { return foods; }
+    const std::vector<Slime>& getSlimes() const { return slimes; }
     const std::vector<double>& getInjections() const { return injections; }
-    const std::deque<double>& getHistory() const { return history; }
-    unsigned getFoodGroups() const;
+    const std::deque<double>& getHistory(unsigned slime = 0) const { return slimes.at(slime).history; }
+    unsigned getFoodGroups(std::size_t slime = noNode) const;
+    unsigned getJoinedSlimes() const;
     unsigned getActiveEdges() const;
     double getBalanceError() const { return balanceError; }
     double getNetworkLength() const;
     double getTransportLength() const;
-    double getConnectionLength(bool transportOnly = false) const;
+    double getConnectionLength(bool transportOnly = false, unsigned slime = 0) const;
     static double distance(Position a, Position b);
     // Apply the same local tube adaptation to supplied hydraulic experiments.
     static void adaptTubes(std::vector<Edge>& tubes, const Settings& settings, unsigned iteration);
@@ -89,7 +92,9 @@ private:
     Position randomDirection();
     std::size_t component(std::size_t node) const;
     void rebuildComponents();
-    std::size_t addNode(Position position, double pressure = 0);
+    void initializeColonies();
+    std::size_t addNode(Position position, double pressure = 0, unsigned slime = 0);
+    unsigned countTips(unsigned slime) const;
     void launchFoodTip(std::size_t food, unsigned fan = 1);
     void replenishTips();
     std::size_t chooseTarget(std::size_t node, Position direction, std::size_t avoid = noNode) const;
@@ -106,9 +111,9 @@ private:
     std::vector<Edge> edges;
     std::vector<Tip> tips;
     std::vector<Food> foods;
+    std::vector<Slime> slimes;
     std::vector<std::size_t> parents;
     std::vector<double> injections;
-    std::deque<double> history;
     std::deque<RetiredEdge> retired;
     unsigned iteration = 0;
     std::size_t nextFood = 0;

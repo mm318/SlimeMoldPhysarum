@@ -13,14 +13,25 @@
 // on a random seed to arrange an exact endpoint or interior intersection.
 struct PhysarumSimulationTestAccess {
     using S = PhysarumSimulation;
+    static void seed(S& s, const S::Settings& settings, std::uint32_t seed, bool sixFoods = false) {
+        s.settings = settings; s.random.seed(seed);
+        s.foods = {{{0.08, 0.5}, S::noNode}, {{0.92, 0.5}, S::noNode}};
+        if (sixFoods)
+            for (S::Position p : {S::Position{0.25, 0.16}, {0.72, 0.18}, {0.3, 0.82}, {0.78, 0.8}})
+                s.foods.push_back({p, S::noNode});
+        s.initializeColonies();
+    }
     static void load(S& s, std::vector<S::Node> nodes,
                      const std::vector<std::pair<std::size_t, std::size_t>>& links,
                      std::vector<S::Tip> tips) {
-        S::Settings settings; settings.sixFoods = false;
-        s.reset(settings, 2026);
+        S::Settings settings;
+        seed(s, settings, 2026);
         s.nodes = std::move(nodes); s.edges.clear(); s.rebuildComponents();
-        s.foods = {{s.nodes[0].position, 0}, {s.nodes[1].position, 1}};
-        s.tips = std::move(tips); s.tips.reserve(settings.maxTips);
+        s.foods = {{s.nodes[0].position, 0, s.nodes[0].slime}, {s.nodes[1].position, 1, s.nodes[1].slime}};
+        s.slimes.assign(std::max(s.nodes[0].slime, s.nodes[1].slime) + 1, {});
+        for (std::size_t f = 0; f < s.foods.size(); ++f) s.slimes[s.foods[f].slime].foods.push_back(f);
+        for (auto& slime : s.slimes) slime.history.assign(1, 0);
+        s.tips = std::move(tips); s.tips.reserve(settings.maxTips * s.slimes.size());
         for (auto link : links) if (!s.addEdge(link.first, link.second))
             throw std::runtime_error("Invalid contact fixture");
         s.iteration = 100;
@@ -32,6 +43,11 @@ struct PhysarumSimulationTestAccess {
         return result;
     }
     static void finishFrontiers(S& s) { s.tips.clear(); s.updateExploration(); }
+    static bool addEdge(S& s, std::size_t a, std::size_t b) { return s.addEdge(a, b); }
+    static void establishSlime(S& s, unsigned slime) {
+        for (auto& edge : s.edges) if (s.nodes[edge.a].slime == slime) edge.state = S::TubeState::Established;
+        s.updateExploration(); s.transport();
+    }
     static void settle(S& s, unsigned steps) {
         for (unsigned t = 0; t < steps; ++t) {
             s.adaptTubes(s.edges, s.settings, s.iteration);
@@ -134,10 +150,9 @@ void checkRouteFairness() {
 void checkBackboneSettlesWhileExploring() {
     Simulation simulation;
     Simulation::Settings settings;
-    settings.sixFoods = false;
     settings.maxTips = 48;
     settings.branching = 0.12;
-    simulation.reset(settings, 2026);
+    PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
     double low = 10, high = 0, initial = 10, rebound = 0;
     for (unsigned turn = 0; turn < 2500; ++turn) {
         simulation.step();
@@ -164,9 +179,9 @@ void checkBackboneSettlesWhileExploring() {
 void checkLongGrowthAndFusion() {
     Simulation simulation;
     Simulation::Settings settings;
-    settings.sixFoods = false; settings.maxTips = 1;
+    settings.maxTips = 1;
     settings.maxNodes = 500; settings.branching = 0;
-    simulation.reset(settings, 2026);
+    PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
     require(simulation.getFoodGroups() == 2 && simulation.getHistory().back() > 0.8,
             "Seeding food B must not count as a physical A-B connection");
     simulation.step();
@@ -256,11 +271,107 @@ void checkSharedForkProtection() {
             "An abandoned fork must release its node without destroying the surviving protected branch");
 }
 
+void checkForeignContacts() {
+    using Access = PhysarumSimulationTestAccess;
+    Simulation headOn;
+    Access::load(headOn, {{{0.48, 0.5}}, {{0.524, 0.5}, 0, 0, 1}, {{0.49, 0.5}}, {{0.499, 0.5}},
+                          {{0.514, 0.5}, 0, 0, 1}, {{0.505, 0.5}, 0, 0, 1}},
+                 {{0, 2}, {2, 3}, {1, 4}, {4, 5}},
+                 {{3, Simulation::noNode, 0, {1, 0}, 1}, {5, Simulation::noNode, 1, {-1, 0}, 1}});
+    require(!Access::addEdge(headOn, 3, 5), "The graph must reject a short edge between different slimes");
+    require(Access::extend(headOn, 0) && !headOn.getTips()[0].active && !headOn.getTips()[1].active,
+            "Opposing foreign tips must both be annihilated, including collinear encounters");
+    require(headOn.getNodes().size() == 6 && headOn.getEdges().size() == 4 && headOn.getFoodGroups() == 2,
+            "Foreign tip collision must leave the colonies disconnected without adding or splitting tubes");
+
+    for (bool established : {false, true}) {
+        Simulation body;
+        Access::load(body, {{{0.485, 0.495}}, {{0.512, 0.47}, 0, 0, 1}, {{0.495, 0.495}}, {{0.505, 0.495}},
+                            {{0.512, 0.48}, 0, 0, 1}, {{0.512, 0.49}, 0, 0, 1},
+                            {{0.512, 0.50}, 0, 0, 1}, {{0.512, 0.51}, 0, 0, 1}},
+                     {{0, 2}, {2, 3}, {1, 4}, {4, 5}, {5, 6}, {6, 7}},
+                     {{3, Simulation::noNode, 0, {1, 0}, 1}, {7, Simulation::noNode, 1, {0, 1}, 1}});
+        if (established) Access::establishSlime(body, 1);
+        const auto before = body.getEdges();
+        require(Access::extend(body, 0) && !body.getTips()[0].active && body.getTips()[1].active,
+                "A foreign branch/trunk collision must terminate only the incoming tip");
+        require(body.getNodes().size() == 8 && body.getEdges().size() == 6 && body.getFoodGroups() == 2,
+                "A foreign body must never be split into a shared hydraulic junction");
+        for (std::size_t e = 2; e < before.size(); ++e) {
+            const auto& after = body.getEdges()[e];
+            require(after.a == before[e].a && after.b == before[e].b && after.length == before[e].length &&
+                    after.state == before[e].state && after.conductivity == before[e].conductivity,
+                    "Foreign contact must preserve the other slime's whole exploring branch or trunk");
+        }
+    }
+
+    Simulation food;
+    Access::load(food, {{{0.48, 0.5}}, {{0.505, 0.5}, 0, 0, 1}, {{0.49, 0.5}}, {{0.499, 0.5}}},
+                 {{0, 2}, {2, 3}}, {{3, Simulation::noNode, 0, {1, 0}, 1}});
+    require(Access::extend(food, 0) && !food.getTips()[0].active && food.getNodes().size() == 4 && food.getEdges().size() == 2,
+            "An isolated foreign food source must block a tip without being claimed or connected");
+}
+
+void checkTenSlimes() {
+    Simulation simulation;
+    Simulation::Settings settings;
+    simulation.reset(settings, 2026);
+    require(simulation.getSlimes().size() == 10 && simulation.getFoods().size() >= 20 && simulation.getFoods().size() <= 30,
+            "The scene must contain exactly ten slimes with twenty to thirty owned foods");
+    bool two = false, three = false;
+    const auto originalFoods = simulation.getFoods();
+    for (unsigned slime = 0; slime < 10; ++slime) {
+        const auto& sources = simulation.getSlimes()[slime].foods;
+        require(sources.size() == 2 || sources.size() == 3, "Each slime must own exactly two or three foods");
+        two |= sources.size() == 2; three |= sources.size() == 3;
+        for (auto f : sources) require(simulation.getFoods()[f].slime == slime, "A food source must belong to its listed slime");
+    }
+    require(two && three, "The seeded example must demonstrate both random food counts");
+    for (unsigned turn = 0; turn < 700; ++turn) {
+        simulation.step();
+        const auto& nodes = simulation.getNodes();
+        require(nodes.size() <= 5000 && simulation.getBalanceError() < 1e-5,
+                "Ten independent slimes must share the node cap and conserve hydraulic flow");
+        std::vector<unsigned> tips(10);
+        for (const auto& tip : simulation.getTips()) {
+            const auto owner = nodes[tip.node].slime;
+            require(owner < 10 && simulation.getFoods()[tip.food].slime == owner &&
+                    (tip.target == Simulation::noNode || simulation.getFoods()[tip.target].slime == owner),
+                    "A tip must originate from and target its own slime's foods");
+            ++tips[owner];
+        }
+        for (auto count : tips) require(count <= settings.maxTips, "The configurable frontier cap must apply to each slime");
+        for (const auto& edge : simulation.getEdges()) {
+            require(nodes[edge.a].slime == nodes[edge.b].slime,
+                    "Cross-slime contacts must never create shared edges or pressure components");
+            require(edge.length <= Simulation::maxStep + 1e-12, "Every slime must obey the physical extension limit");
+            if (edge.state == Simulation::TubeState::Exploring)
+                require(edge.flow == 0 && edge.foodLoad == 0, "Competing explorers must remain free of artificial flow demand");
+        }
+        for (std::size_t f = 0; f < originalFoods.size(); ++f) {
+            const auto& food = simulation.getFoods()[f];
+            require(food.slime == originalFoods[f].slime && food.position == originalFoods[f].position &&
+                    nodes[food.node].slime == food.slime && nodes[food.node].position == food.position,
+                    "A slime must retain its own permanent food sources through collision and pruning");
+        }
+        require(simulation.getFoodGroups() >= 10, "Different slimes must always remain separate hydraulic networks");
+    }
+    simulation.setTipLimit(1);
+    for (unsigned slime = 0; slime < 10; ++slime) {
+        unsigned count = 0;
+        for (const auto& tip : simulation.getTips()) count += simulation.getNodes()[tip.node].slime == slime;
+        require(count <= 1, "Lowering the live cap must trim every slime independently");
+        require(simulation.getHistory(slime).size() == 701, "Every slime must maintain its own bounded progress history");
+    }
+    for (const auto& edge : simulation.getRetiredEdges()) require(edge.slime < 10, "Retired trails must retain slime identity");
+    std::cout << "Ten slimes: foods=" << simulation.getFoods().size() << ", joined=" << simulation.getJoinedSlimes()
+              << ", nodes=" << simulation.getNodes().size() << '\n';
+}
+
 void checkGrowth(bool sixFoods, unsigned seed) {
     Simulation simulation;
     Simulation::Settings settings;
-    settings.sixFoods = sixFoods;
-    simulation.reset(settings, seed);
+    PhysarumSimulationTestAccess::seed(simulation, settings, seed, sixFoods);
     require(simulation.getNodes().size() == (sixFoods ? 6u : 2u) && simulation.getEdges().empty(),
             "Growth must begin with one isolated root per food and no precomputed edges");
     require(simulation.getFoodGroups() == simulation.getFoods().size(),
@@ -390,7 +501,7 @@ void checkGrowth(bool sixFoods, unsigned seed) {
     std::cout << (sixFoods ? "Six" : "Two") << " foods, seed " << seed << ": groups=" << simulation.getFoodGroups()
               << ", nodes=" << simulation.getNodes().size() << ", active=" << simulation.getActiveEdges()
               << ", first B=" << firstGoal << ", A-B=" << simulation.getConnectionLength() << '\n';
-    simulation.reset(settings, seed);
+    PhysarumSimulationTestAccess::seed(simulation, settings, seed, sixFoods);
     require(simulation.getNodes().size() == simulation.getFoods().size() && simulation.getEdges().empty() && simulation.getRetiredEdges().empty() && simulation.getIteration() == 0,
             "Reset must clear all grown tubes and transport state");
 }
@@ -400,11 +511,10 @@ void checkRecyclingAndContinuousGrowth() {
     Simulation::Settings settings;
     settings.maxNodes = 25;
     settings.maxTips = 1;
-    settings.sixFoods = false;
     settings.branching = 0;
     settings.reinforcement = 0;
     settings.adaptation = 0.2;
-    simulation.reset(settings, 2026);
+    PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
     unsigned births = 0;
     bool freed = false, lateGrowth = false;
     std::size_t previousNodes = 1;
@@ -438,9 +548,9 @@ void checkRecyclingAndContinuousGrowth() {
 void checkProtectedNodeBudget() {
     Simulation simulation;
     Simulation::Settings settings;
-    settings.sixFoods = false; settings.maxNodes = 25;
+    settings.maxNodes = 25;
     settings.maxTips = 1; settings.branching = 0;
-    simulation.reset(settings, 2026);
+    PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
     for (unsigned t = 0; t < 100; ++t) simulation.step();
     require(simulation.getNodes().size() == 25 && simulation.getTips().size() == 1,
             "A full protected budget must pause growth without destroying its waiting frontier");
@@ -454,7 +564,7 @@ void checkLiveTipLimit() {
     Simulation::Settings settings;
     settings.maxTips = 3;
     settings.branching = 1;
-    simulation.reset(settings, 42);
+    PhysarumSimulationTestAccess::seed(simulation, settings, 42);
     for (int t = 0; t < 15; ++t) simulation.step();
     const auto before = simulation.getNodes();
     const auto turn = simulation.getIteration();
@@ -512,6 +622,7 @@ int main() {
         checkHydraulics();
         checkRouteFairness();
         checkContactSemantics();
+        checkForeignContacts();
         checkSharedForkProtection();
         checkLongGrowthAndFusion();
         checkBackboneSettlesWhileExploring();
@@ -521,6 +632,7 @@ int main() {
         checkDeterminismAndBudgets();
         checkGrowth(false, 2026);
         checkGrowth(true, 2026);
+        checkTenSlimes();
         std::cout << "PASS food colonies, contact semantics, flow-free exploration, hydraulic selection, pruning, and seeds\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n'; return 1;
