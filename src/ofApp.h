@@ -19,7 +19,7 @@ private:
     ofxPanel gui;
     ofParameterGroup controls;
     ofParameter<int> nodeLimit, tipLimit, stepsPerFrame;
-    ofParameter<float> branching, foodBias, adaptation, reinforcement;
+    ofParameter<float> branching, foodBias, adaptation, reinforcement, exploration;
     ofParameter<bool> paused, sixFoods, showExploration, showNodes, showTips, showFlow;
     unsigned seed = 2026;
     double flowClock = 0;

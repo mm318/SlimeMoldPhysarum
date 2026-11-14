@@ -25,6 +25,7 @@ void ofApp::setup() {
     controls.add(foodBias.set("Food growth bias", 0.32f, 0.0f, 0.5f));
     controls.add(adaptation.set("Tube adaptation rate", 0.035f, 0.005f, 0.2f));
     controls.add(reinforcement.set("Flow reinforcement", 1.0f, 0.0f, 2.0f));
+    controls.add(exploration.set("Growth flow per food", 0.012f, 0.0f, 0.05f));
     gui.setup(controls, "graph-settings.xml");
     reset();
 }
@@ -35,6 +36,7 @@ PhysarumSimulation::Settings ofApp::parameters() const {
     s.maxNodes = nodeLimit; s.maxTips = tipLimit;
     s.branching = value(branching); s.foodBias = value(foodBias);
     s.adaptation = value(adaptation); s.reinforcement = value(reinforcement);
+    s.exploration = value(exploration);
     s.sixFoods = sixFoods;
     return s;
 }
@@ -50,7 +52,8 @@ void ofApp::update() {
     const auto& current = simulation.getSettings();
     if (s.maxNodes != current.maxNodes ||
         s.branching != current.branching || s.foodBias != current.foodBias ||
-        s.adaptation != current.adaptation || s.reinforcement != current.reinforcement || s.sixFoods != current.sixFoods)
+        s.adaptation != current.adaptation || s.reinforcement != current.reinforcement ||
+        s.exploration != current.exploration || s.sixFoods != current.sixFoods)
         reset();
     else if (s.maxTips != current.maxTips) simulation.setTipLimit(s.maxTips);
     if (!paused || singleStep) {
@@ -82,7 +85,7 @@ void ofApp::draw() {
     ofPushStyle();
     ofBackground(6, 12, 9);
     ofSetColor(228, 234, 202);
-    ofDrawBitmapString("ONE SEED / A GROWING FLOW NETWORK", 24, 28);
+    ofDrawBitmapString("FOOD SOURCES / A GROWING FLOW NETWORK", 24, 28);
     ofSetColor(133, 153, 127);
     ofDrawBitmapString("Branches explore. Flow reinforces useful tubes. Quiet routes fade.", 24, 50);
     ofFill();
@@ -97,7 +100,7 @@ void ofApp::draw() {
     for (const auto& edge : edges) {
         const auto a = screen(nodes[edge.a].position), b = screen(nodes[edge.b].position);
         if (showExploration) { explored.addVertex(a); explored.addVertex(b); }
-        if (!edge.active || !nodes[edge.a].connected) continue;
+        if (!edge.active) continue;
         if (edge.foodLoad < 0.01) {
             if (showExploration) { scouts.addVertex(a); scouts.addVertex(b); }
             continue;
@@ -156,14 +159,13 @@ void ofApp::draw() {
     for (std::size_t i = 0; i < simulation.getFoods().size(); ++i) {
         const auto& food = simulation.getFoods()[i];
         const auto p = screen(food.position);
-        const bool reached = food.node != PhysarumSimulation::noNode;
-        ofFill(); ofSetColor(209, 185, 111, reached ? 35 : 12);
+        ofFill(); ofSetColor(209, 185, 111, 35);
         ofDrawCircle(p, 12);
         ofNoFill(); ofSetLineWidth(1);
-        ofSetColor(reached ? ofColor(220, 204, 139) : ofColor(106, 112, 81));
+        ofSetColor(220, 204, 139);
         ofDrawCircle(p, 7);
-        ofFill(); ofDrawCircle(p, reached ? 3 : 1.5f);
-        ofDrawBitmapString(std::string(1, char('A' + i)) + (i == 0 ? " / seed" : ""), p.x - 4, p.y - 18);
+        ofFill(); ofDrawCircle(p, 3);
+        ofDrawBitmapString(std::string(1, char('A' + i)), p.x - 4, p.y - 18);
     }
     ofSetColor(143, 164, 131);
     ofDrawBitmapString("Gold: food transport   Green: scouts   Gray: retired exploration", 24, top + side + 25);
@@ -178,7 +180,7 @@ void ofApp::draw() {
     std::ostringstream text;
     text << (paused ? "Paused" : growing ? "Exploring / adapting" : "Node budget full / adapting")
          << "\nStep " << simulation.getIteration()
-         << "\nFoods reached: " << simulation.getReachedFoods() << " / " << simulation.getFoods().size()
+         << "\nFood groups: " << simulation.getFoodGroups() << " (aim: 1)"
          << "\nLive nodes: " << nodes.size() << " / " << nodeLimit
          << "\nActive tubes: " << simulation.getActiveEdges()
          << "\nGrowing tips: " << simulation.getTips().size()
@@ -196,7 +198,7 @@ void ofApp::draw() {
     const float chartTop = textTop + 260, chartWidth = guiWidth - 36, chartHeight = 75;
     if (chartTop + chartHeight + 25 < height) {
         ofSetColor(133, 153, 127);
-        ofDrawBitmapString("Recent approach to food B", width + 12, chartTop - 12);
+        ofDrawBitmapString("Recent A-B frontier gap", width + 12, chartTop - 12);
         ofSetColor(29, 42, 30); ofDrawRectangle(width + 12, chartTop, chartWidth, chartHeight);
         ofPolyline curve;
         const auto& history = simulation.getHistory();
