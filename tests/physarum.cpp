@@ -7,6 +7,38 @@
 #include <set>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
+
+// Deterministic geometries exercise production contact handling without relying
+// on a random seed to arrange an exact endpoint or interior intersection.
+struct PhysarumSimulationTestAccess {
+    using S = PhysarumSimulation;
+    static void load(S& s, std::vector<S::Node> nodes,
+                     const std::vector<std::pair<std::size_t, std::size_t>>& links,
+                     std::vector<S::Tip> tips) {
+        S::Settings settings; settings.sixFoods = false;
+        s.reset(settings, 2026);
+        s.nodes = std::move(nodes); s.edges.clear(); s.rebuildComponents();
+        s.foods = {{s.nodes[0].position, 0}, {s.nodes[1].position, 1}};
+        s.tips = std::move(tips); s.tips.reserve(settings.maxTips);
+        for (auto link : links) if (!s.addEdge(link.first, link.second))
+            throw std::runtime_error("Invalid contact fixture");
+        s.iteration = 100;
+        s.updateExploration(); s.transport();
+    }
+    static bool extend(S& s, std::size_t tip) {
+        const bool result = s.extend(s.tips.at(tip));
+        s.updateExploration(); s.transport();
+        return result;
+    }
+    static void finishFrontiers(S& s) { s.tips.clear(); s.updateExploration(); }
+    static void settle(S& s, unsigned steps) {
+        for (unsigned t = 0; t < steps; ++t) {
+            s.adaptTubes(s.edges, s.settings, s.iteration);
+            s.retire(); s.updateExploration(); s.transport(); ++s.iteration;
+        }
+    }
+};
 
 namespace {
 using Simulation = PhysarumSimulation;
@@ -106,20 +138,27 @@ void checkBackboneSettlesWhileExploring() {
     settings.maxTips = 48;
     settings.branching = 0.12;
     simulation.reset(settings, 2026);
-    double low = 10, high = 0;
+    double low = 10, high = 0, initial = 10, rebound = 0;
     for (unsigned turn = 0; turn < 2500; ++turn) {
         simulation.step();
+        const double route = simulation.getConnectionLength(true);
+        if (initial == 10 && std::isfinite(route)) initial = route;
         if (turn > 400) {
-            const double route = simulation.getConnectionLength(true);
-            require(std::isfinite(route) && route < 0.85,
-                    "Continued branching must not displace the efficient food-carrying A-B backbone");
-            if (turn > 2000) { low = std::min(low, route); high = std::max(high, route); }
+            require(std::isfinite(route) && route <= initial + 1e-9,
+                    "Continued branching must not replace the initial food-carrying backbone with a longer route");
+            if (turn > 2000) {
+                low = std::min(low, route); high = std::max(high, route);
+                rebound = std::max(rebound, route - low);
+            }
         }
         require(simulation.getBalanceError() < 1e-5, "Long-running adaptation must retain accurate pressure/flow balance");
     }
-    require(high - low < 0.002 && !simulation.getTips().empty(),
-            "The mature route must settle while exploration remains active");
-    std::cout << "Stable two-food backbone during continuous exploration: " << low << ".." << high << '\n';
+    std::cout << "Two-food backbone during continued exploration: initial=" << initial
+              << ", late=" << low << ".." << high << ", rebound=" << rebound << '\n';
+    // Discovering a shorter physical connection can improve the mature route
+    // during this window; reject inefficient replacements, not improvements.
+    require(rebound < 0.002 && high <= initial && !simulation.getTips().empty(),
+            "Continued exploration must preserve the mature backbone while permitting newly discovered improvements");
 }
 
 void checkLongGrowthAndFusion() {
@@ -133,29 +172,88 @@ void checkLongGrowthAndFusion() {
     simulation.step();
     require(simulation.getEdges().size() == 1 &&
             std::abs(simulation.getEdges()[0].conductivity - 0.003) < 1e-12 &&
-            std::abs(simulation.getEdges()[0].flow - settings.exploration) < 1e-9,
-            "A newborn thin feeder must carry its tip's prescribed consumption through solved pressure");
+            simulation.getEdges()[0].flow == 0 && simulation.getEdges()[0].state == Simulation::TubeState::Exploring,
+            "A newborn exploring branch must remain thin and alive without consuming flow");
     unsigned joined = 0;
-    bool oldFeeder = false, fading = false, otherFoodLaunched = false;
-    double previousFade = settings.exploration + 1;
+    bool oldBranch = false, otherFoodLaunched = false;
     for (unsigned turn = 1; turn < 180; ++turn) {
         simulation.step();
         if (simulation.getFoodGroups() == 1 && !joined) joined = simulation.getIteration();
         if (!joined && turn > 40)
-            for (const auto& edge : simulation.getEdges()) oldFeeder |= turn - edge.born > 31;
+            for (const auto& edge : simulation.getEdges()) {
+                oldBranch |= turn - edge.born > 31;
+                require(edge.state == Simulation::TubeState::Exploring && edge.conductivity == 0.003 && edge.flow == 0,
+                        "An unconnected frontier's entire branch must survive with zero flow regardless of age");
+            }
         for (const auto& tip : simulation.getTips()) otherFoodLaunched |= tip.food == 1;
-        double fade = 0;
-        for (const auto& demand : simulation.getGrowthDemands())
-            if (demand.fading && demand.food == 0 && demand.node == simulation.getFoods()[1].node) fade += demand.flow;
-        if (fade > 0) {
-            require(fade < previousFade, "A fused tip's withdrawal must decrease on every fading step");
-            require(simulation.getIteration() < joined + Simulation::fusionFadeSteps,
-                    "A fused tip must stop consuming exploration flow when its fade finishes");
-            previousFade = fade; fading = true;
-        }
     }
-    require(oldFeeder && joined >= 84 && joined < 120 && fading && otherFoodLaunched,
-            "Supported growth must outlive 31 steps, reach the other food, fade, and rotate the single tip slot");
+    require(oldBranch && joined >= 84 && joined < 120 && otherFoodLaunched,
+            "Flow-free exploration must outlive 31 steps, physically connect, and rotate the single tip slot");
+}
+
+void checkContactSemantics() {
+    using Access = PhysarumSimulationTestAccess;
+    Simulation tips;
+    Access::load(tips, {{{0.48, 0.5}}, {{0.524, 0.5}}, {{0.49, 0.5}}, {{0.499, 0.5}},
+                        {{0.514, 0.5}}, {{0.505, 0.5}}},
+                 {{0, 2}, {2, 3}, {1, 4}, {4, 5}},
+                 {{3, 1, 0, {1, 0}, 1}, {5, 0, 1, {-1, 0}, 1}});
+    require(Access::extend(tips, 0), "Head-on exploring tips must join even when their segments are collinear");
+    require(!tips.getTips()[0].active && !tips.getTips()[1].active,
+            "Tip-to-tip contact must consume both frontiers immediately");
+    require(tips.getFoodGroups() == 1 && tips.getEdges().size() == 5 &&
+            std::all_of(tips.getEdges().begin(), tips.getEdges().end(), [](const auto& e) { return e.state == Simulation::TubeState::Established; }),
+            "Both complete branches must enter hydraulic competition at tip-to-tip fusion");
+    for (const auto& edge : tips.getEdges()) require(std::abs(std::abs(edge.flow) - 1) < 1e-8,
+                                                    "The new trunk must carry actual food-to-food flow");
+
+    Simulation branch;
+    Access::load(branch, {{{0.485, 0.495}}, {{0.512, 0.47}}, {{0.495, 0.495}}, {{0.505, 0.495}},
+                          {{0.512, 0.48}}, {{0.512, 0.49}}, {{0.512, 0.50}}, {{0.512, 0.51}}},
+                 {{0, 2}, {2, 3}, {1, 4}, {4, 5}, {5, 6}, {6, 7}},
+                 {{3, 1, 0, {1, 0}, 1}, {7, 0, 1, {0, 1}, 1}});
+    require(Access::extend(branch, 0), "An exploring tip must make a junction inside another exploring branch");
+    require(!branch.getTips()[0].active && branch.getTips()[1].active && branch.getTips()[1].node == 7,
+            "An interior branch contact must consume only the incoming tip");
+    unsigned exploring = 0;
+    double protectedLength = 0;
+    for (const auto& edge : branch.getEdges()) if (edge.state == Simulation::TubeState::Exploring) {
+        ++exploring; protectedLength += edge.length;
+        require(edge.flow == 0 && edge.foodLoad == 0, "The surviving distal branch must draw no hydraulic flow");
+    }
+    require(exploring == 2 && std::abs(protectedLength - 0.015) < 1e-10 && branch.getFoodGroups() == 1,
+            "Only the distal subset beyond the new junction must retain exploration protection");
+    auto copy = branch.getEdges();
+    for (unsigned t = 101; t < 250; ++t) {
+        Simulation::adaptTubes(copy, branch.getSettings(), t);
+        for (const auto& edge : copy) if (edge.state == Simulation::TubeState::Exploring)
+            require(edge.active && edge.conductivity == 0.003, "Zero-flow distal segments must remain alive");
+    }
+    Access::finishFrontiers(branch);
+    Access::settle(branch, 100);
+    require(!branch.getRetiredEdges().empty(), "An abandoned zero-flow branch must become eligible for retirement");
+}
+
+void checkSharedForkProtection() {
+    Simulation fork;
+    PhysarumSimulationTestAccess::load(fork,
+        {{{0.48, 0.5}}, {{0.50, 0.5}}, {{0.49, 0.5}}, {{0.49, 0.51}}, {{0.49, 0.52}}, {{0.50, 0.51}}},
+        {{0, 2}, {2, 1}, {2, 3}, {3, 4}, {3, 5}},
+        {{4, 1, 0, {0, 1}, 1}, {5, 1, 0, {1, 0}, 1}});
+    fork.setTipLimit(1);
+    const auto& edges = fork.getEdges();
+    require(edges[2].state == Simulation::TubeState::Exploring && edges[3].state == Simulation::TubeState::Exploring &&
+            edges[4].state == Simulation::TubeState::Abandoned,
+            "Removing a fork's side tip must release its stub while retaining the surviving tip's shared stem");
+    for (const auto& edge : edges) {
+        const auto& nodes = fork.getNodes();
+        const double expected = edge.conductivity / edge.length * (nodes[edge.a].pressure - nodes[edge.b].pressure);
+        require(std::abs(edge.flow - expected) < 1e-9,
+                "Protected and abandoned fork portions must share their trunk anchor's pressure");
+    }
+    PhysarumSimulationTestAccess::settle(fork, 100);
+    require(fork.getNodes().size() == 5 && fork.getEdges().size() == 4 && fork.getTips().size() == 1,
+            "An abandoned fork must release its node without destroying the surviving protected branch");
 }
 
 void checkGrowth(bool sixFoods, unsigned seed) {
@@ -175,7 +273,7 @@ void checkGrowth(bool sixFoods, unsigned seed) {
     require(std::all_of(initialTips.begin(), initialTips.end(), [](unsigned count) { return count == 3; }),
             "The default budget must give every food three initial tips");
     unsigned firstGoal = 0;
-    bool loop = false, branching = false, continuedSupport = false, fading = false, lateral = false;
+    bool loop = false, branching = false, continuedExploration = false, lateral = false;
     for (unsigned turn = 0; turn < 1200; ++turn) {
         std::set<std::tuple<unsigned, double, double>> previousPositions;
         for (const auto& node : simulation.getNodes())
@@ -200,8 +298,9 @@ void checkGrowth(bool sixFoods, unsigned seed) {
             const double length = Simulation::distance(nodes[edge.a].position, nodes[edge.b].position);
             require(std::abs(length - edge.length) < 1e-10 && length > 0 && length <= 0.01 + 1e-12,
                     "Every grown, joined, or split tube must obey the Euclidean 0.01 limit");
-            require(edge.explorationDrive <= Simulation::explorationConductivityLimit,
-                    "Exploration reinforcement must remain capped at thin-tube conductivity");
+            if (edge.state == Simulation::TubeState::Exploring)
+                require(edge.flow == 0 && edge.foodLoad == 0 && edge.conductivity == 0.003,
+                        "Protected exploring branches must remain alive and thin without hydraulic demand");
             require(std::isfinite(edge.conductivity) && edge.conductivity > 0 && std::isfinite(edge.flow),
                     "Tube conductance and flow must remain finite");
             if (edge.active) {
@@ -229,21 +328,12 @@ void checkGrowth(bool sixFoods, unsigned seed) {
         for (const auto& food : simulation.getFoods())
             require(food.node < nodes.size() && nodes[food.node].position == food.position,
                     "Every food root must remain fixed and alive, even in a separate colony");
-        std::vector<double> spent(simulation.getFoods().size()), growth(nodes.size());
-        for (const auto& demand : simulation.getGrowthDemands()) {
-            require(demand.food < spent.size() && demand.node < nodes.size() && demand.flow > 0,
-                    "Every tip sink must have a valid supplying food and positive consumption");
-            spent[demand.food] += demand.flow;
-            growth[demand.node] -= demand.flow;
-            growth[simulation.getFoods()[demand.food].node] += demand.flow;
-            fading |= demand.fading;
-        }
-        for (auto flow : spent) require(flow <= settings.exploration + 1e-12,
-                                       "Each food's growth budget must be shared across active and fading tips");
-        for (std::size_t i = 0; i < nodes.size(); ++i)
-            require(std::abs(growth[i] - simulation.getGrowthInjections()[i]) < 1e-12,
-                    "A tip must consume real flow supplied at its originating food");
-        continuedSupport |= simulation.getFoodGroups() == 1 && !simulation.getGrowthDemands().empty() && turn > 200;
+        std::vector<bool> isFood(nodes.size());
+        for (const auto& food : simulation.getFoods()) isFood[food.node] = true;
+        for (std::size_t i = 0; i < nodes.size(); ++i) if (!isFood[i])
+            require(simulation.getInjections()[i] == 0, "Exploring tips and junctions must never consume flow");
+        continuedExploration |= simulation.getFoodGroups() == 1 && turn > 200 &&
+            std::any_of(edges.begin(), edges.end(), [](const auto& edge) { return edge.state == Simulation::TubeState::Exploring; });
         for (const auto& tip : simulation.getTips())
             lateral |= tip.age == 0 && nodes[tip.node].born + 40 < turn &&
                        std::none_of(simulation.getFoods().begin(), simulation.getFoods().end(),
@@ -274,8 +364,8 @@ void checkGrowth(bool sixFoods, unsigned seed) {
     if (!sixFoods) require(firstGoal >= 42 && firstGoal < 84,
                           "Opposing A/B fronts must physically meet between the foods without jumping");
     require(simulation.getFoodGroups() == 1, "The seeded colonies must merge into one supplied network");
-    require(continuedSupport && fading && lateral,
-            "Exploration must continue after connection, fade on fusion, and sprout from established trunks");
+    require(continuedExploration && lateral,
+            "Protected exploration must continue after food connection and sprout from established trunks");
     require(branching && loop, "The growing graph must form branch junctions and reconnecting routes");
     require(!simulation.getRetiredEdges().empty(), "Weak exploratory branches must retire while growth continues");
     require(std::isfinite(simulation.getConnectionLength()) && simulation.getConnectionLength() >= 0.84 - 1e-9,
@@ -319,6 +409,9 @@ void checkRecyclingAndContinuousGrowth() {
     bool freed = false, lateGrowth = false;
     std::size_t previousNodes = 1;
     for (unsigned turn = 0; turn < 5000; ++turn) {
+        // Explicit frontier retirement makes this tiny fixture reclaim capacity;
+        // an entirely protected full graph otherwise waits for room by design.
+        if (turn % 100 == 99) PhysarumSimulationTestAccess::finishFrontiers(simulation);
         require(simulation.step(), "There must be no automatic growth or total-step cutoff");
         const auto& nodes = simulation.getNodes();
         require(nodes.size() <= settings.maxNodes, "Only current live nodes may consume the node cap");
@@ -339,7 +432,21 @@ void checkRecyclingAndContinuousGrowth() {
     for (const auto& edge : simulation.getRetiredEdges())
         require(Simulation::distance(edge.a, edge.b) <= Simulation::maxStep + 1e-12,
                 "Archived tubes must preserve their real bounded geometry independently of remapped live nodes");
-    std::cout << "Continuous recycling: " << births << " births with a " << settings.maxNodes << "-node live cap\n";
+    std::cout << "Controlled recycling: " << births << " births with a " << settings.maxNodes << "-node live cap\n";
+}
+
+void checkProtectedNodeBudget() {
+    Simulation simulation;
+    Simulation::Settings settings;
+    settings.sixFoods = false; settings.maxNodes = 25;
+    settings.maxTips = 1; settings.branching = 0;
+    simulation.reset(settings, 2026);
+    for (unsigned t = 0; t < 100; ++t) simulation.step();
+    require(simulation.getNodes().size() == 25 && simulation.getTips().size() == 1,
+            "A full protected budget must pause growth without destroying its waiting frontier");
+    for (const auto& edge : simulation.getEdges())
+        require(edge.state == Simulation::TubeState::Exploring && edge.active && edge.flow == 0 && edge.conductivity == 0.003,
+                "The node cap must not remove protection or create artificial demand");
 }
 
 void checkLiveTipLimit() {
@@ -404,14 +511,17 @@ int main() {
     try {
         checkHydraulics();
         checkRouteFairness();
+        checkContactSemantics();
+        checkSharedForkProtection();
         checkLongGrowthAndFusion();
         checkBackboneSettlesWhileExploring();
         checkRecyclingAndContinuousGrowth();
+        checkProtectedNodeBudget();
         checkLiveTipLimit();
         checkDeterminismAndBudgets();
         checkGrowth(false, 2026);
         checkGrowth(true, 2026);
-        std::cout << "PASS food colonies, meeting fronts, growth sinks, hydraulic selection, local extensions, pruning, and seeds\n";
+        std::cout << "PASS food colonies, contact semantics, flow-free exploration, hydraulic selection, pruning, and seeds\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n'; return 1;
     }

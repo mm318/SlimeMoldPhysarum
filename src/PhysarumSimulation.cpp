@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
-#include <numeric>
 #include <queue>
 #include <stdexcept>
 #include <utility>
@@ -63,15 +62,14 @@ void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
         s.maxTips == 0 || s.maxTips > 128 || !std::isfinite(s.branching) || s.branching < 0 || s.branching > 1 ||
         !std::isfinite(s.foodBias) || s.foodBias < 0 || s.foodBias > 1 ||
         !std::isfinite(s.adaptation) || s.adaptation <= 0 || s.adaptation > 1 ||
-        !std::isfinite(s.reinforcement) || s.reinforcement < 0 || s.reinforcement > 3 ||
-        !std::isfinite(s.exploration) || s.exploration < 0 || s.exploration > 0.1)
+        !std::isfinite(s.reinforcement) || s.reinforcement < 0 || s.reinforcement > 3)
         throw std::invalid_argument("Invalid growing-graph settings");
     settings = s;
     random.seed(seed);
     iteration = 0;
     balanceError = 0;
     nodes.clear(); parents.clear(); edges.clear(); tips.clear(); retired.clear();
-    fading.clear(); growthDemands.clear(); nextFood = 0;
+    nextFood = 0;
     tips.reserve(settings.maxTips);
     foods = {{start, noNode}, {goal, noNode}};
     if (settings.sixFoods) {
@@ -84,7 +82,6 @@ void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
             launchFoodTip(f, fan);
     nextFood = tips.size() % foods.size();
     injections.assign(nodes.size(), 0);
-    growthInjections.assign(nodes.size(), 0);
     history.assign(1, distance(start, goal));
 }
 
@@ -93,7 +90,7 @@ void PhysarumSimulation::setTipLimit(unsigned limit) {
     settings.maxTips = limit;
     tips.reserve(limit);
     if (tips.size() > limit) tips.resize(limit);
-    if (!nodes.empty()) transport();
+    if (!nodes.empty()) { updateExploration(); transport(); }
 }
 
 std::size_t PhysarumSimulation::component(std::size_t node) const {
@@ -151,6 +148,7 @@ bool PhysarumSimulation::addEdge(std::size_t a, std::size_t b) {
     for (const auto& edge : edges) if (edge.active &&
         ((edge.a == a && edge.b == b) || (edge.a == b && edge.b == a))) return false;
     edges.push_back({a, b, length, 0.003, 0, iteration, true});
+    edges.back().state = TubeState::Exploring;
     const auto rootA = component(a), rootB = component(b);
     parents[std::max(rootA, rootB)] = std::min(rootA, rootB);
     return true;
@@ -220,9 +218,15 @@ bool PhysarumSimulation::extend(Tip& tip) {
         const auto a = nodes[edge.a].position;
         const auto segment = subtract(nodes[edge.b].position, a);
         const double denominator = cross(ray, segment);
-        if (std::abs(denominator) < 1e-12) continue;
-        const double t = cross(subtract(a, from), segment) / denominator;
-        const double u = cross(subtract(a, from), ray) / denominator;
+        double t, u = 0;
+        if (std::abs(denominator) < 1e-12) {
+            if (std::abs(cross(subtract(a, from), ray)) > 1e-12) continue;
+            const double length2 = dot(ray, ray);
+            t = std::min(dot(subtract(a, from), ray), dot(subtract(nodes[edge.b].position, from), ray)) / length2;
+        } else {
+            t = cross(subtract(a, from), segment) / denominator;
+            u = cross(subtract(a, from), ray) / denominator;
+        }
         if (t > 1e-4 && t <= 1 && u >= 0 && u <= 1 && t < first) { first = t; hit = e; }
     }
     const bool joining = hit != noNode || destination != noNode;
@@ -252,7 +256,9 @@ bool PhysarumSimulation::extend(Tip& tip) {
     // resulting loop. Both routes compete through subsequent hydraulic solves.
     if (joining) {
         tip.active = false;
-        fading.push_back({destination, tip.food, fusionFadeSteps});
+        // Every frontier at the contact point is consumed. A frontier beyond
+        // an interior branch contact remains active on its distal portion.
+        for (auto& other : tips) if (other.node == destination) other.active = false;
     }
     return true;
 }
@@ -297,15 +303,69 @@ void PhysarumSimulation::grow() {
     if (nodes.size() < settings.maxNodes) replenishTips();
 }
 
+void PhysarumSimulation::updateExploration() {
+    std::vector<std::vector<std::size_t>> incident(nodes.size());
+    std::vector<unsigned> degree(nodes.size());
+    std::vector<bool> anchors(nodes.size()), peeled(edges.size());
+    for (const auto& food : foods) anchors[food.node] = true;
+    for (std::size_t e = 0; e < edges.size(); ++e) if (edges[e].active) {
+        const auto& edge = edges[e];
+        incident[edge.a].push_back(e); incident[edge.b].push_back(e);
+        ++degree[edge.a]; ++degree[edge.b];
+        if (edge.state == TubeState::Established) anchors[edge.a] = anchors[edge.b] = true;
+    }
+    // Strip pendant branches. What remains joins food/trunk anchors or closes
+    // a loop, so its newly connected segments now need hydraulic reinforcement.
+    std::queue<std::size_t> queue;
+    for (std::size_t i = 0; i < nodes.size(); ++i) if (!anchors[i] && degree[i] <= 1) queue.push(i);
+    while (!queue.empty()) {
+        const auto node = queue.front(); queue.pop();
+        for (auto e : incident[node]) if (!peeled[e]) {
+            peeled[e] = true;
+            const auto& edge = edges[e];
+            const auto other = edge.a == node ? edge.b : edge.a;
+            --degree[node]; --degree[other];
+            if (!anchors[other] && degree[other] == 1) queue.push(other);
+        }
+    }
+    for (std::size_t e = 0; e < edges.size(); ++e) if (edges[e].active && !peeled[e]) edges[e].state = TubeState::Established;
+    for (const auto& edge : edges) if (edge.active && edge.state == TubeState::Established)
+        anchors[edge.a] = anchors[edge.b] = true;
+
+    // Orient the remaining exploratory trees away from their anchors. Protect
+    // only the union of paths to surviving tips, including shared fork stems.
+    std::vector<std::size_t> parentEdge(nodes.size(), noNode);
+    std::vector<bool> seen = anchors, protectedEdge(edges.size());
+    for (std::size_t i = 0; i < nodes.size(); ++i) if (anchors[i]) queue.push(i);
+    while (!queue.empty()) {
+        const auto node = queue.front(); queue.pop();
+        for (auto e : incident[node]) if (edges[e].state != TubeState::Established) {
+            const auto& edge = edges[e];
+            const auto other = edge.a == node ? edge.b : edge.a;
+            if (seen[other]) continue;
+            seen[other] = true; parentEdge[other] = e; queue.push(other);
+        }
+    }
+    for (const auto& tip : tips) if (tip.active) {
+        auto node = tip.node;
+        while (parentEdge[node] != noNode) {
+            const auto e = parentEdge[node];
+            if (protectedEdge[e]) break;
+            protectedEdge[e] = true;
+            node = edges[e].a == node ? edges[e].b : edges[e].a;
+        }
+    }
+    for (std::size_t e = 0; e < edges.size(); ++e) if (edges[e].active && edges[e].state != TubeState::Established)
+        edges[e].state = protectedEdge[e] ? TubeState::Exploring : TubeState::Abandoned;
+}
+
 void PhysarumSimulation::adaptTubes(std::vector<Edge>& tubes, const Settings& settings, unsigned iteration) {
     for (auto& edge : tubes) if (edge.active && edge.born < iteration) {
-        // Food-to-food transport selects the backbone. Provisional frontier
-        // demand can support only a thin foraging tube, never a replacement trunk.
-        const double target = settings.reinforcement * edge.foodLoad + edge.explorationDrive;
+        if (edge.state == TubeState::Exploring) { edge.weakSteps = 0; continue; }
+        const double target = settings.reinforcement * edge.foodLoad;
         edge.conductivity = std::clamp(edge.conductivity + settings.adaptation * (target - edge.conductivity), 1e-6, 3.0);
-        const double feedingThreshold = std::max(1e-7, settings.exploration / (4 * settings.maxTips));
         const bool weak = edge.conductivity < 0.002 && edge.foodLoad < 0.002 &&
-                          edge.explorationDrive < feedingThreshold && target <= edge.conductivity;
+                          target <= edge.conductivity;
         edge.weakSteps = weak ? edge.weakSteps + 1 : 0;
         if (edge.weakSteps >= pruningDelay) edge.active = false;
     }
@@ -341,10 +401,6 @@ void PhysarumSimulation::retire() {
         return !tip.active || remap[tip.node] == noNode;
     }), tips.end());
     for (auto& tip : tips) tip.node = remap[tip.node];
-    fading.erase(std::remove_if(fading.begin(), fading.end(), [&](const FadingDemand& demand) {
-        return remap[demand.node] == noNode || demand.remaining == 0;
-    }), fading.end());
-    for (auto& demand : fading) { demand.node = remap[demand.node]; --demand.remaining; }
     for (auto& food : foods) food.node = remap[food.node];
     nodes.swap(liveNodes);
     edges.swap(liveEdges);
@@ -355,14 +411,17 @@ void PhysarumSimulation::retire() {
         return food;
     };
     for (auto& tip : tips) tip.food = provider(tip.node, tip.food);
-    for (auto& demand : fading) demand.food = provider(demand.node, demand.food);
 }
 
 void PhysarumSimulation::transport() {
     std::vector<std::vector<std::size_t>> groups(nodes.size());
     for (const auto& food : foods) groups[component(food.node)].push_back(food.node);
     std::vector<double> supply(nodes.size()), pumpingPressure(nodes.size());
-    for (auto& edge : edges) edge.foodLoad = edge.explorationDrive = 0;
+    for (auto& edge : edges) edge.foodLoad = 0;
+    // Protected trees have no sinks and carry exactly zero flow. Leaving them
+    // out of the solve also avoids conditioning the mesh on thousands of scouts.
+    auto hydraulic = edges;
+    for (auto& edge : hydraulic) if (edge.state != TubeState::Established) edge.active = false;
     injections.assign(nodes.size(), 0);
     // Each independent colony balances its own flow. Root-to-food basis solves
     // span every food pair within that colony; no flow crosses an unjoined gap.
@@ -373,7 +432,7 @@ void PhysarumSimulation::transport() {
         for (std::size_t k = 1; k < ports.size(); ++k) {
             std::fill(supply.begin(), supply.end(), 0);
             supply[ports[0]] = 1; supply[ports[k]] = -1;
-            solveFlow(nodes, edges, supply);
+            solveFlow(nodes, hydraulic, supply);
             for (std::size_t i = 0; i < nodes.size(); ++i) basis[k][i] = nodes[i].pressure;
         }
         const std::size_t pairs = ports.size() * (ports.size() - 1) / 2;
@@ -381,7 +440,7 @@ void PhysarumSimulation::transport() {
         std::size_t source = 0, sink = 0, pair = 0;
         for (std::size_t a = 0; a < ports.size(); ++a) for (std::size_t b = a + 1; b < ports.size(); ++b, ++pair) {
             if (pair == selected) { source = a; sink = b; }
-            for (auto& edge : edges) if (component(edge.a) == root) {
+            for (auto& edge : edges) if (edge.state == TubeState::Established && component(edge.a) == root) {
                 const double flow = edge.conductivity / edge.length *
                     ((basis[b][edge.a] - basis[a][edge.a]) - (basis[b][edge.b] - basis[a][edge.b]));
                 edge.foodLoad += std::abs(flow) / pairs;
@@ -393,36 +452,26 @@ void PhysarumSimulation::transport() {
             pumpingPressure[i] = sign * (basis[sink][i] - basis[source][i]);
     }
 
-    growthDemands.clear();
-    growthInjections.assign(nodes.size(), 0);
-    // Every food retains a bounded exploration budget after colonies connect.
-    // Finished tips fade out; their sink never becomes food-to-food reinforcement.
-    if (nodes.size() < settings.maxNodes && settings.exploration > 0) {
-        std::vector<double> weights(foods.size());
-        for (const auto& tip : tips) if (tip.node != foods[tip.food].node) ++weights[tip.food];
-        for (const auto& demand : fading) if (demand.node != foods[demand.food].node)
-            weights[demand.food] += double(demand.remaining) / fusionFadeSteps;
-        const auto consume = [&](std::size_t node, std::size_t food, double weight, bool fading) {
-            if (node == foods[food].node || weight == 0) return;
-            const double flow = settings.exploration * weight / std::max(1.0, weights[food]);
-            growthDemands.push_back({node, food, flow, fading});
-            growthInjections[node] -= flow;
-            growthInjections[foods[food].node] += flow;
-        };
-        for (const auto& tip : tips) consume(tip.node, tip.food, 1, false);
-        for (const auto& demand : fading) consume(demand.node, demand.food, double(demand.remaining) / fusionFadeSteps, true);
+    for (std::size_t i = 0; i < nodes.size(); ++i) nodes[i].pressure = pumpingPressure[i];
+    balanceError = solveFlow(nodes, hydraulic, injections);
+    for (std::size_t e = 0; e < edges.size(); ++e) edges[e].flow = hydraulic[e].flow;
+
+    // A pendant tree has its anchor's pressure throughout, consistent with Q=0.
+    std::vector<std::vector<std::size_t>> neighbors(nodes.size());
+    std::vector<bool> known(nodes.size());
+    for (const auto& food : foods) known[food.node] = true;
+    for (const auto& edge : edges) if (edge.active) {
+        if (edge.state == TubeState::Established) { known[edge.a] = known[edge.b] = true; continue; }
+        neighbors[edge.a].push_back(edge.b); neighbors[edge.b].push_back(edge.a);
     }
-    std::vector<double> foodFlow(edges.size());
-    for (std::size_t e = 0; e < edges.size(); ++e) {
-        const auto& edge = edges[e];
-        foodFlow[e] = edge.conductivity / edge.length * (pumpingPressure[edge.a] - pumpingPressure[edge.b]);
-    }
-    for (std::size_t i = 0; i < nodes.size(); ++i)
-        { nodes[i].pressure = pumpingPressure[i]; injections[i] += growthInjections[i]; }
-    balanceError = solveFlow(nodes, edges, injections);
-    for (std::size_t e = 0; e < edges.size(); ++e) {
-        edges[e].explorationDrive = growthDemands.empty() ? 0 :
-            std::min(explorationConductivityLimit, std::abs(edges[e].flow - foodFlow[e]));
+    std::queue<std::size_t> queue;
+    for (std::size_t i = 0; i < nodes.size(); ++i) if (known[i]) queue.push(i);
+    while (!queue.empty()) {
+        const auto node = queue.front(); queue.pop();
+        for (auto other : neighbors[node]) if (!known[other]) {
+            nodes[other].pressure = nodes[node].pressure;
+            known[other] = true; queue.push(other);
+        }
     }
 }
 
@@ -439,12 +488,14 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
     const auto neighbors = adjacency(points, tubes);
     const auto roots = components(neighbors);
     const std::size_t n = points.size();
+    std::vector<std::size_t> unknowns;
     std::vector<double> diagonal(n, 1), x(n), rhs = supply, r(n), z(n), direction(n), product(n);
     std::vector<double> sum(n);
     for (std::size_t i = 0; i < n; ++i) {
         if (!std::isfinite(supply[i])) throw std::invalid_argument("Flow injections must be finite");
         sum[roots[i]] += supply[i];
         if (roots[i] != i) {
+            unknowns.push_back(i);
             diagonal[i] = 0;
             for (const auto& neighbor : neighbors[i]) diagonal[i] += neighbor.second;
             x[i] = points[i].pressure - points[roots[i]].pressure;
@@ -453,8 +504,7 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
     for (auto total : sum) if (std::abs(total) > 1e-8)
         throw std::invalid_argument("Flow supply must balance demand within each component");
     auto apply = [&](const std::vector<double>& input, std::vector<double>& output) {
-        std::fill(output.begin(), output.end(), 0);
-        for (std::size_t i = 0; i < n; ++i) if (roots[i] != i) {
+        for (auto i : unknowns) {
             output[i] = diagonal[i] * input[i];
             for (const auto& neighbor : neighbors[i]) if (roots[neighbor.first] != neighbor.first)
                 output[i] -= neighbor.second * input[neighbor.first];
@@ -462,20 +512,21 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
     };
     apply(x, product);
     double rz = 0;
-    for (std::size_t i = 0; i < n; ++i) if (roots[i] != i) {
+    for (auto i : unknowns) {
         r[i] = rhs[i] - product[i];
         z[i] = r[i] / diagonal[i];
         direction[i] = z[i];
         rz += r[i] * z[i];
     }
     // Jacobi-preconditioned conjugate gradients on the grounded graph Laplacian.
-    for (std::size_t k = 0; k < std::min<std::size_t>(6 * n + 20, 6000) && rz > 1e-32; ++k) {
+    for (std::size_t k = 0; k < std::min<std::size_t>(6 * unknowns.size() + 20, 6000) && rz > 1e-32; ++k) {
         apply(direction, product);
-        const double denominator = std::inner_product(direction.begin(), direction.end(), product.begin(), 0.0);
+        double denominator = 0;
+        for (auto i : unknowns) denominator += direction[i] * product[i];
         if (denominator <= 0) break;
         const double alpha = rz / denominator;
         double next = 0, residual = 0;
-        for (std::size_t i = 0; i < n; ++i) if (roots[i] != i) {
+        for (auto i : unknowns) {
             x[i] += alpha * direction[i];
             r[i] -= alpha * product[i];
             z[i] = r[i] / diagonal[i];
@@ -483,7 +534,7 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
             residual += r[i] * r[i];
         }
         if (residual < 1e-20) break;
-        for (std::size_t i = 0; i < n; ++i) direction[i] = z[i] + (next / rz) * direction[i];
+        for (auto i : unknowns) direction[i] = z[i] + (next / rz) * direction[i];
         rz = next;
     }
     for (std::size_t i = 0; i < n; ++i) points[i].pressure = x[i];
@@ -504,6 +555,7 @@ bool PhysarumSimulation::step() {
     adaptTubes(edges, settings, iteration);
     retire();
     grow();
+    updateExploration();
     transport();
     ++iteration;
     measure();

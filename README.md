@@ -30,9 +30,17 @@ probes as slots become available.
 
 A crossing splits an existing tube into a real hydraulic junction; tips can
 also join nearby nodes. Contact merges separate colonies or closes a loop in
-an existing colony. Both routes remain available for hydraulic competition.
-Food approaches and nearby-node joins check their actual connecting segment
-for intervening tubes. Established nodes stay fixed.
+an existing colony. When two exploring tips meet, both tips finish and their
+connecting paths become eligible for hydraulic adaptation. When a tip meets
+the interior of another exploring branch, only the incoming tip finishes.
+The other tip keeps growing, with protection limited to the distal portion
+beyond the new junction. The proximal paths become a transport route.
+Forks retain protection on paths still leading to surviving tips.
+
+Both routes of a loop remain available for hydraulic competition. Food
+approaches and nearby-node joins check their actual connecting segment for
+intervening tubes, including head-on collinear contacts. Established nodes
+stay fixed.
 
 Growth has no step or duration limit. The node budget counts only the current
 live network, including every permanent food root. When tubes retire, fragments
@@ -41,9 +49,10 @@ Separate colonies remain alive while supplied by their own foods. Shared
 junctions remain while another live tube uses them.
 
 A full budget pauses extensions while existing food-to-food transport and tube
-adaptation continue. Blocked frontiers stop drawing exploratory growth flow, so
-unused branches can weaken. Growth resumes when pruning frees space, and
-surviving tips wait for room. Finished tips release slots for new frontiers.
+adaptation continue. Protected frontiers wait for room while unused trunks
+can weaken and free capacity. A budget occupied entirely by protected growth
+can stay full until frontiers are removed or the budget is increased. Finished
+tips release slots for new frontiers.
 
 Each tube has a length `L`, conductivity `D`, and signed flow `Q`. At every
 step, a sparse, grounded graph-Laplacian solve computes node pressures and
@@ -62,20 +71,19 @@ using the linear response for both two and six foods. Root-to-food pressure
 solutions provide every pair's flow by superposition. Displayed pumping pairs
 and directions can change without changing reinforcement.
 
-Every food keeps a bounded exploration-flow budget, including after all foods
-connect. Its active tips share that budget as real flow sinks. A tip branching
-from a trunk draws through that trunk from its supplying food. Exploration is
-solved separately from food-pair reinforcement, and its conductivity
-contribution is capped at `0.01`. It can sustain a thin feeder without a thick
-transport trunk. **Growth flow per food** controls the budget; the default is
-`0.012`.
+Exploring branches carry **zero flow** and create no artificial sinks. Their
+conductivity stays at `D = 0.003`, protected from hydraulic decay while they
+lead to active tips. Exploration continues after the food colonies connect,
+including lateral probes from established trunks. It is bounded by the tip and
+live-node caps, with no age, distance, or step-count limit for a growing branch.
 
-New segments begin with conductivity `D = 0.003`. Their actual flow follows
-their resistance and the solved pressures. When a tip fuses with a tube or food,
-its sink fades over 24 steps and food transport selects the new connection.
-Weak tubes must remain weak for 24 consecutive adaptation steps before removal.
-Supported growth corridors and thin routes gaining useful transport survive
-that pruning check. There is no fixed age at which an exploring branch expires.
+After contact, the newly established route loses exploration protection and
+its flow follows its resistance and the solved pressures. Food transport alone
+determines its thickening or thinning. Weak tubes must remain weak for 24
+consecutive adaptation steps before removal. Thin routes gaining useful
+transport survive that pruning check. Abandoned branches also lose protection.
+Protected pendant trees are omitted from the hydraulic solve and inherit their
+anchor's pressure, preserving the zero-flow relation along every segment.
 
 Route shortening comes from **mesh formation and hydraulic selection**. When
 growth reconnects with an existing trunk, flow divides between the old route
@@ -107,8 +115,8 @@ Dijkstra's algorithm is used only to report that route length, not to guide
 growth or reinforcement.
 
 The chart records the closest historical gap between the A and B colonies,
-reaching zero when they join. Growth and exploration support are custom choices
-for this visualization.
+reaching zero when they join. Growth and exploration protection are custom
+choices for this visualization.
 This is neither the 2020 numerical SMA optimizer nor a biological validation
 or proof of fractal scaling. Multi-food adaptation can favor shared routes
 over the shortest route between one particular food pair.
@@ -124,7 +132,7 @@ over the shortest route between one particular food pair.
 | S / L | Save/load controls |
 
 The panel selects two or six foods, toggles graph/flow layers, and controls
-branching, nutrient bias, live-node budget, tip limit, growth-flow budget, and
+branching, nutrient bias, live-node budget, tip limit, and
 hydraulic adaptation.
 **Max growing tips** is adjustable live from **1 to 128** without resetting the
 network. Lowering it immediately removes excess frontiers; raising it permits
@@ -132,7 +140,7 @@ additional forks, lateral probes, and food-site restarts. Other model changes
 restart growth; visibility and playback speed preserve state. Settings are
 saved to `build/bin/data/graph-settings.xml`.
 
-Defaults: seed `2026`, continuous simulation, 1,800 live nodes, and 18 growing
+Defaults: seed `2026`, continuous simulation, 5,000 live nodes, and 18 growing
 tips. Pause manually with Space. The `0.01` extension limit applies to each
 simulation step, independently of the steps-per-frame playback setting.
 
@@ -169,13 +177,15 @@ two- and six-food meshes verify that a thin shorter route can replace a thick
 detour, while an inefficient newcomer cannot displace the shorter route.
 Independent pairwise solves check the production food-flow average.
 
-End-to-end checks cover growth from every food, meeting fronts, fixed node
-positions, physical step lengths, mass conservation, per-food growth budgets,
-fusion demand, continued exploration, lateral probes, mesh formation, pruning,
-and deterministic resets. A 5,000-step regression repeatedly reuses a 25-node
-capacity. Live tip-limit tests verify that changing the cap preserves the graph.
-A single-tip case checks that supplied feeders outlive 31 steps, physically
-reach the other food, fade their withdrawal, and rotate food origins.
+Controlled contacts verify that tip-to-tip fusion consumes both tips and an
+interior branch contact preserves only the other tip's distal exploring subset.
+They check zero flow in protected segments and real flow in the new trunk.
+End-to-end checks cover growth from every food, fixed node positions, physical
+step lengths, mass conservation, continued exploration, lateral probes, meshes,
+pruning, and deterministic resets. A 5,000-step regression explicitly retires
+frontiers to repeatedly reuse a 25-node capacity. Live tip-limit tests verify
+that changing the cap preserves the graph. A single-tip case checks that
+flow-free branches outlive 31 steps, connect, and rotate food origins.
 
 The graph simulation uses only the C++ standard library and can be tested
 without openFrameworks or a display:
@@ -195,7 +205,7 @@ c++ -std=c++17 -O2 -Isrc tests/physarum.cpp src/PhysarumSimulation.cpp \
   Tero model.
 
 Classical adaptive-conductance models operate on an existing graph. The local
-growth, bifurcation, joining, exploratory demand, rotating food supply, and
+growth, bifurcation, joining, exploration protection, rotating food supply, and
 visual presentation here are additions inferred for this project.
 
 [growth-video]: https://www.youtube.com/shorts/PGH4C2rPiaM

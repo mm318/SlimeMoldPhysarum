@@ -20,6 +20,7 @@ public:
         double pressure = 0;
         unsigned born = 0;
     };
+    enum class TubeState { Exploring, Established, Abandoned };
     struct Edge {
         std::size_t a, b;
         double length;
@@ -28,8 +29,8 @@ public:
         unsigned born = 0;
         bool active = true;
         double foodLoad = 0;
-        double explorationDrive = 0;
         unsigned weakSteps = 0;
+        TubeState state = TubeState::Established;
     };
     struct Food { Position position; std::size_t node = noNode; };
     struct RetiredEdge { Position a, b; };
@@ -39,26 +40,18 @@ public:
         unsigned age = 0, sinceBranch = 0;
         bool active = true;
     };
-    struct GrowthDemand {
-        std::size_t node, food;
-        double flow;
-        bool fading;
-    };
     struct Settings {
-        std::size_t maxNodes = 1800;
+        std::size_t maxNodes = 5000;
         unsigned maxTips = 18;
         double branching = 0.055;
         double foodBias = 0.32;
         double adaptation = 0.035;
         double reinforcement = 1.0;
-        double exploration = 0.012;
         bool sixFoods = true;
     };
     static constexpr Position start{0.08, 0.5};
     static constexpr Position goal{0.92, 0.5};
     static constexpr double maxStep = 0.01;
-    static constexpr double explorationConductivityLimit = 0.01;
-    static constexpr unsigned fusionFadeSteps = 24;
     static constexpr unsigned pruningDelay = 24;
     static constexpr std::size_t retiredHistoryLimit = 20000;
     static constexpr std::size_t progressHistoryLimit = 4096;
@@ -74,8 +67,6 @@ public:
     const std::vector<Tip>& getTips() const { return tips; }
     const std::vector<Food>& getFoods() const { return foods; }
     const std::vector<double>& getInjections() const { return injections; }
-    const std::vector<double>& getGrowthInjections() const { return growthInjections; }
-    const std::vector<GrowthDemand>& getGrowthDemands() const { return growthDemands; }
     const std::deque<double>& getHistory() const { return history; }
     unsigned getFoodGroups() const;
     unsigned getActiveEdges() const;
@@ -93,6 +84,7 @@ public:
                             const std::vector<double>& injections);
 
 private:
+    friend struct PhysarumSimulationTestAccess;
     double uniform();
     Position randomDirection();
     std::size_t component(std::size_t node) const;
@@ -104,6 +96,7 @@ private:
     bool addEdge(std::size_t a, std::size_t b);
     void grow();
     bool extend(Tip& tip);
+    void updateExploration();
     void retire();
     void transport();
     void measure();
@@ -114,11 +107,7 @@ private:
     std::vector<Tip> tips;
     std::vector<Food> foods;
     std::vector<std::size_t> parents;
-    struct FadingDemand { std::size_t node, food; unsigned remaining; };
-    std::vector<FadingDemand> fading;
-    std::vector<GrowthDemand> growthDemands;
     std::vector<double> injections;
-    std::vector<double> growthInjections;
     std::deque<double> history;
     std::deque<RetiredEdge> retired;
     unsigned iteration = 0;
