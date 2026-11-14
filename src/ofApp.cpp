@@ -24,6 +24,7 @@ void ofApp::setup() {
     controls.add(branching.set("Branching probability", 0.055f, 0.0f, 0.2f));
     controls.add(foodBias.set("Food growth bias", 0.32f, 0.0f, 0.5f));
     controls.add(adaptation.set("Tube adaptation rate", 0.035f, 0.005f, 0.2f));
+    controls.add(shortening.set("Tube shortening", 0.3f, 0.0f, 1.0f));
     controls.add(reinforcement.set("Flow reinforcement", 1.0f, 0.0f, 2.0f));
     gui.setup(controls, "graph-settings.xml");
     reset();
@@ -35,6 +36,7 @@ PhysarumSimulation::Settings ofApp::parameters() const {
     s.maxNodes = nodeLimit; s.maxTips = tipLimit;
     s.branching = value(branching); s.foodBias = value(foodBias);
     s.adaptation = value(adaptation); s.reinforcement = value(reinforcement);
+    s.shortening = value(shortening);
     s.sixFoods = sixFoods;
     return s;
 }
@@ -50,7 +52,7 @@ void ofApp::update() {
     const auto& current = simulation.getSettings();
     if (s.maxNodes != current.maxNodes ||
         s.branching != current.branching || s.foodBias != current.foodBias ||
-        s.adaptation != current.adaptation || s.reinforcement != current.reinforcement || s.sixFoods != current.sixFoods)
+        s.adaptation != current.adaptation || s.reinforcement != current.reinforcement || s.shortening != current.shortening || s.sixFoods != current.sixFoods)
         reset();
     else if (s.maxTips != current.maxTips) simulation.setTipLimit(s.maxTips);
     if (!paused || singleStep) {
@@ -91,12 +93,17 @@ void ofApp::draw() {
     const auto& nodes = simulation.getNodes();
     const auto& edges = simulation.getEdges();
     ofMesh explored; explored.setMode(OF_PRIMITIVE_LINES);
+    ofMesh scouts; scouts.setMode(OF_PRIMITIVE_LINES);
     std::array<ofMesh, 9> tubes;
     for (auto& mesh : tubes) mesh.setMode(OF_PRIMITIVE_LINES);
     for (const auto& edge : edges) {
         const auto a = screen(nodes[edge.a].position), b = screen(nodes[edge.b].position);
         if (showExploration) { explored.addVertex(a); explored.addVertex(b); }
         if (!edge.active || !nodes[edge.a].connected) continue;
+        if (edge.foodLoad < 0.01) {
+            if (showExploration) { scouts.addVertex(a); scouts.addVertex(b); }
+            continue;
+        }
         const double thickness = std::clamp(std::sqrt(edge.conductivity / 1.1), 0.0, 1.0);
         auto& mesh = tubes[std::min(8, int(thickness * 8))];
         mesh.addVertex(a); mesh.addVertex(b);
@@ -107,6 +114,9 @@ void ofApp::draw() {
     ofSetLineWidth(0.7f);
     ofSetColor(71, 96, 66, 72);
     explored.draw();
+    ofSetColor(118, 152, 83, 110);
+    ofSetLineWidth(0.65f);
+    scouts.draw();
     if (showNodes) {
         ofMesh points; points.setMode(OF_PRIMITIVE_POINTS);
         for (const auto& node : nodes) points.addVertex(screen(node.position));
@@ -158,7 +168,7 @@ void ofApp::draw() {
         ofDrawBitmapString(std::string(1, char('A' + i)) + (i == 0 ? " / seed" : ""), p.x - 4, p.y - 18);
     }
     ofSetColor(143, 164, 131);
-    ofDrawBitmapString("Gold: conducting tubes   Gray: explored graph   Bright points: flow", 24, top + side + 25);
+    ofDrawBitmapString("Gold: food transport   Green: scouts   Gray: retired exploration", 24, top + side + 25);
     ofDrawBitmapString("Every branch grows from the existing network, at most 0.01 per step.", 24, top + side + 43);
     ofSetColor(17, 25, 19);
     ofDrawRectangle(width, 0, guiWidth, height);
@@ -166,7 +176,7 @@ void ofApp::draw() {
     gui.draw();
     const float textTop = gui.getHeight() + 30;
     const bool growing = nodes.size() < std::size_t(nodeLimit.get());
-    const double path = simulation.getConnectionLength();
+    const double path = simulation.getConnectionLength(true);
     std::ostringstream text;
     text << (paused ? "Paused" : growing ? "Exploring / adapting" : "Node budget full / adapting")
          << "\nStep " << simulation.getIteration()
@@ -175,8 +185,9 @@ void ofApp::draw() {
          << "\nActive tubes: " << simulation.getActiveEdges()
          << "\nGrowing tips: " << simulation.getTips().size()
          << std::fixed << std::setprecision(4)
-         << "\n\nNetwork length: " << simulation.getNetworkLength()
-         << "\nA-B route: " << (std::isfinite(path) ? ofToString(path, 4) : "not connected")
+         << "\n\nFood backbone: " << simulation.getTransportLength()
+         << "\nAll live tubes: " << simulation.getNetworkLength()
+         << "\nA-B backbone: " << (std::isfinite(path) ? ofToString(path, 4) : "not established")
          << "\nGrowth cap: 0.0100"
          << "\nSeed: " << seed
          << "\n\nSpace: pause  N: step"
@@ -184,7 +195,7 @@ void ofApp::draw() {
          << "\nS / L: save / load controls";
     ofSetColor(216, 226, 199);
     ofDrawBitmapString(text.str(), width + 12, textTop);
-    const float chartTop = textTop + 230, chartWidth = guiWidth - 36, chartHeight = 75;
+    const float chartTop = textTop + 260, chartWidth = guiWidth - 36, chartHeight = 75;
     if (chartTop + chartHeight + 25 < height) {
         ofSetColor(133, 153, 127);
         ofDrawBitmapString("Recent approach to food B", width + 12, chartTop - 12);

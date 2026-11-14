@@ -34,7 +34,7 @@ void checkHydraulics() {
         Simulation::solveFlow(nodes, edges, supply);
         for (auto& edge : edges)
             edge.conductivity = std::max(1e-6, edge.conductivity + 0.035 *
-                (std::pow(std::abs(edge.flow), 1.1) - edge.conductivity));
+                (Simulation::flowResponse(edge.flow, false) - edge.conductivity));
     }
     require(Simulation::solveFlow(nodes, edges, supply) < 1e-8 && edges[0].flow > 0.95 && edges[2].flow < 0.05,
             "Reinforcement must transfer transport to the shorter competing route");
@@ -43,6 +43,70 @@ void checkHydraulics() {
     try { Simulation::solveFlow(nodes, edges, {1, 0, 0, 0}); }
     catch (const std::invalid_argument&) { rejected = true; }
     require(rejected, "Unbalanced hydraulic supply must be rejected");
+}
+
+void checkRouteFairness() {
+    const double diagonal = std::hypot(0.005, 0.005);
+    const std::vector<Simulation::Node> geometry{{{0, 0}}, {{0.005, 0}}, {{0.01, 0}}, {{0.005, 0.005}}};
+    for (bool shortEstablished : {true, false}) {
+        auto nodes = geometry;
+        const double shortD = shortEstablished ? 1 : 0.01, longD = shortEstablished ? 0.01 : 1;
+        std::vector<Simulation::Edge> edges{{0, 1, 0.005, shortD}, {1, 2, 0.005, shortD},
+                                          {0, 3, diagonal, longD}, {3, 2, diagonal, longD}};
+        for (unsigned t = 0; t < 1200; ++t) {
+            require(Simulation::solveFlow(nodes, edges, {1, 0, -1, 0}) < 1e-8, "Competition fixture must conserve flow");
+            if (shortEstablished)
+                require(edges[0].flow > 0.95, "A new longer route must never dethrone an established shorter route");
+            for (auto& edge : edges) edge.conductivity = std::max(1e-6, edge.conductivity +
+                0.035 * (Simulation::flowResponse(edge.flow, false) - edge.conductivity));
+        }
+        require(edges[0].conductivity > 100 * edges[2].conductivity,
+                "Route efficiency must win independently of which route started thicker");
+    }
+}
+
+void checkShortening() {
+    Simulation fixed, shortening;
+    Simulation::Settings settings;
+    settings.sixFoods = false; settings.maxTips = 1; settings.branching = 0;
+    shortening.reset(settings, 2026);
+    settings.shortening = 0;
+    fixed.reset(settings, 2026);
+    for (unsigned t = 0; t < 2200; ++t) { fixed.step(); shortening.step(); }
+    require(shortening.getConnectionLength() < 0.841 &&
+            shortening.getConnectionLength() < fixed.getConnectionLength() - 0.003,
+            "Mature tubes must physically shorten, rather than preserving their original bent skeleton");
+    require(shortening.getFoods()[0].position == Simulation::start &&
+            shortening.getNodes()[shortening.getFoods()[0].node].position == Simulation::start &&
+            shortening.getNodes()[shortening.getFoods()[1].node].position == Simulation::goal,
+            "Shortening must keep both food anchors fixed");
+    for (const auto& edge : shortening.getEdges())
+        require(edge.length <= Simulation::maxStep + 1e-12, "Shortening must preserve the local edge-length limit");
+    require(shortening.getIteration() == 2200 && !shortening.getTips().empty(),
+            "Settling the backbone must not require stopping exploration");
+}
+
+void checkBackboneSettlesWhileExploring() {
+    Simulation simulation;
+    Simulation::Settings settings;
+    settings.sixFoods = false;
+    settings.maxTips = 48;
+    settings.branching = 0.12;
+    simulation.reset(settings, 2026);
+    double low = 10, high = 0;
+    for (unsigned turn = 0; turn < 2500; ++turn) {
+        simulation.step();
+        if (turn > 400) {
+            const double route = simulation.getConnectionLength(true);
+            require(std::isfinite(route) && route < 0.85,
+                    "Continued branching must not displace the efficient food-carrying A-B backbone");
+            if (turn > 2000) { low = std::min(low, route); high = std::max(high, route); }
+        }
+        require(simulation.getBalanceError() < 1e-5, "Long-running adaptation must retain accurate pressure/flow balance");
+    }
+    require(high - low < 0.002 && !simulation.getTips().empty(),
+            "The mature route must settle while exploration remains active");
+    std::cout << "Stable two-food backbone during continuous exploration: " << low << ".." << high << '\n';
 }
 
 void checkGrowth(bool sixFoods, unsigned seed) {
@@ -62,6 +126,9 @@ void checkGrowth(bool sixFoods, unsigned seed) {
         const auto& edges = simulation.getEdges();
         require(nodes.size() <= settings.maxNodes && simulation.getTips().size() <= settings.maxTips,
                 "Growth must respect its node and frontier budgets");
+        if (simulation.getBalanceError() >= 1e-5)
+            std::cerr << "Balance failure at " << simulation.getIteration() << " with " << nodes.size()
+                      << " nodes: " << simulation.getBalanceError() << '\n';
         require(simulation.getBalanceError() < 1e-5, "Node pressures must produce mass-conserving transport");
         std::vector<unsigned> degree(nodes.size());
         std::vector<double> balance(nodes.size());
@@ -71,6 +138,8 @@ void checkGrowth(bool sixFoods, unsigned seed) {
             const double length = Simulation::distance(nodes[edge.a].position, nodes[edge.b].position);
             require(std::abs(length - edge.length) < 1e-10 && length > 0 && length <= 0.01 + 1e-12,
                     "Every grown, joined, or split tube must obey the Euclidean 0.01 limit");
+            if (simulation.getReachedFoods() == simulation.getFoods().size())
+                require(edge.explorationDrive == 0, "Scouts must not receive reinforcing demand after all foods are connected");
             require(std::isfinite(edge.conductivity) && edge.conductivity > 0 && std::isfinite(edge.flow),
                     "Tube conductance and flow must remain finite");
             if (edge.active) {
@@ -98,6 +167,30 @@ void checkGrowth(bool sixFoods, unsigned seed) {
         for (const auto& food : simulation.getFoods()) if (food.node != Simulation::noNode)
             require(food.node < nodes.size() && nodes[food.node].position == food.position && nodes[food.node].connected,
                     "Reached foods must be actual nodes in the conducting network");
+    }
+    if (sixFoods) {
+        auto referenceNodes = simulation.getNodes();
+        auto referenceEdges = simulation.getEdges();
+        const auto& foods = simulation.getFoods();
+        std::vector<double> drive(referenceEdges.size()), load(referenceEdges.size());
+        const double pairs = foods.size() * (foods.size() - 1) / 2;
+        for (std::size_t a = 0; a < foods.size(); ++a) for (std::size_t b = a + 1; b < foods.size(); ++b) {
+            require(foods[a].node != Simulation::noNode && foods[b].node != Simulation::noNode,
+                    "Every food must remain connected for pairwise transport validation");
+            std::vector<double> supply(referenceNodes.size());
+            supply[foods[a].node] = 1; supply[foods[b].node] = -1;
+            require(Simulation::solveFlow(referenceNodes, referenceEdges, supply) < 1e-5,
+                    "Independent pairwise pressure solves must conserve mass");
+            for (std::size_t e = 0; e < referenceEdges.size(); ++e) {
+                load[e] += std::abs(referenceEdges[e].flow) / pairs;
+                drive[e] += Simulation::flowResponse(referenceEdges[e].flow, true) / pairs;
+            }
+        }
+        for (std::size_t e = 0; e < referenceEdges.size(); ++e) {
+            require(std::abs(drive[e] - simulation.getEdges()[e].foodDrive) < 1e-6 &&
+                    std::abs(load[e] - simulation.getEdges()[e].foodLoad) < 1e-6,
+                    "Tube reinforcement must average every food pair, independently of the displayed pumping phase");
+        }
     }
     require(firstGoal >= 84, "Food B cannot be reached in fewer than 84 local growth steps");
     require(simulation.getReachedFoods() == simulation.getFoods().size(), "The seeded scene must discover all food sources");
@@ -228,6 +321,9 @@ void checkDeterminismAndBudgets() {
 int main() {
     try {
         checkHydraulics();
+        checkRouteFairness();
+        checkShortening();
+        checkBackboneSettlesWhileExploring();
         checkRecyclingAndContinuousGrowth();
         checkLiveTipLimit();
         checkDeterminismAndBudgets();

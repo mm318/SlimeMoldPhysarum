@@ -24,10 +24,13 @@ public:
     struct Edge {
         std::size_t a, b;
         double length;
-        double conductivity = 0.035;
+        double conductivity = 0.003;
         double flow = 0;
         unsigned born = 0;
         bool active = true;
+        double foodLoad = 0;
+        double foodDrive = 0;
+        double explorationDrive = 0;
     };
     struct Food { Position position; std::size_t node = noNode; };
     struct RetiredEdge { Position a, b; };
@@ -44,6 +47,7 @@ public:
         double foodBias = 0.32;
         double adaptation = 0.035;
         double reinforcement = 1.0;
+        double shortening = 0.3;
         bool sixFoods = true;
     };
     static constexpr Position start{0.08, 0.5};
@@ -68,8 +72,10 @@ public:
     unsigned getActiveEdges() const;
     double getBalanceError() const { return balanceError; }
     double getNetworkLength() const;
-    double getConnectionLength() const;
+    double getTransportLength() const;
+    double getConnectionLength(bool transportOnly = false) const;
     static double distance(Position a, Position b);
+    static double flowResponse(double flow, bool multipleFoods);
     // Solve a supplied network too, e.g. for controlled hydraulic experiments.
     // Positive injections supply flow, negative injections consume it. Sum=0.
     // Node zero is the pressure reference. Disconnected, undriven nodes are ignored.
@@ -85,6 +91,7 @@ private:
     bool extend(Tip& tip);
     void adapt();
     void retire();
+    void shorten();
     void transport();
     void measure();
     Settings settings;

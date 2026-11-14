@@ -41,25 +41,46 @@ Q(a,b) = D(a,b) / L(a,b) * (pressure(a) - pressure(b))
 sum(outgoing flows at a node) = supplied flow - consumed flow
 ```
 
-Growing tips draw a small exploratory flow. Discovered foods exchange transport;
-each takes a turn supplying the other foods, so neither A nor B is a permanently
-absorbing endpoint. A tube's conductivity adapts toward `reinforcement * |Q|^1.1`.
-Low-flow tubes narrow and eventually retire; useful routes retain larger
-conductivity. This feedback changes actual network transport, not just colors.
-The pressure solve uses Jacobi-preconditioned conjugate gradients.
+Food-to-food flow selects the backbone. Conductivity adapts toward the average
+response over **every connected food pair**, calculated by superposing root-to-food
+pressure solutions. The displayed pumping pair and flow direction can change
+without changing which routes receive reinforcement. Two foods use the linear
+Tero response `f(Q) = |Q|`; multiple foods use a saturating response
+`f(Q) = 2 * |Q|^1.8 / (1 + |Q|^1.8)`, normalized so `f(1) = 1`.
 
-Gold strokes are conducting edges, with width mapped from conductivity.
+Exploration receives a separate, limited support flow only while food remains
+unconnected. Its conductivity contribution is capped at `0.01` and disappears
+once all foods are joined. New segments begin as thin trials (`D = 0.003`), and
+unsupported ones retire. A candidate with increasing useful transport is not
+removed merely for starting thin. Younger routes receive no extra food-flow
+reward. This lets a shorter new route compete while an inefficient new route
+cannot replace a better established trunk just by attracting an exploratory tip.
+
+Mature food-carrying tubes can also physically shorten. A local mechanical
+relaxation reduces flow-weighted length, with food locations and growing tips
+fixed. Moves are gradual, stay within the surface, preserve the `0.01` edge
+limit, and reject new crossings. **Tube shortening** can be set to zero to
+compare against the original fixed skeleton. This is an additional geometric
+model; the reference film's fixed fine mesh selects routes without moving nodes.
+
+The hydraulic solve uses Jacobi-preconditioned conjugate gradients, with a
+larger convergence budget for the conductance contrasts produced by contracting
+tubes. Flow reinforcement changes actual transport, not just the appearance.
+
+Gold strokes highlight food transport, with width mapped from conductivity;
+thin green strokes show active scouts.
 Animated bright points follow the signed flow direction. Gray lines retain
 explored and retired branches; small points mark live graph nodes. Retired
 geometry is a separate, bounded drawing history (20,000 segments), so it does
 not consume the live-node budget or hydraulic solver capacity. The progress
 chart retains the last 4,096 samples without limiting simulation duration. Food rings
 brighten when reached. The sidebar reports graph size, connected tube length,
-and the shortest A-B route remaining in the current graph. Dijkstra's algorithm
+the food-carrying backbone length, and its shortest A-B route. Weak scout
+connections do not count as an established backbone route. Dijkstra's algorithm
 is used only to report that route length, not to guide growth or reinforcement.
 
-Growth rules and the `1.1` reinforcement exponent are custom choices for this
-visualization. This is neither the 2020 numerical SMA optimizer nor a biological
+Growth, exploration support, and geometric shortening are custom choices for
+this visualization. This is neither the 2020 numerical SMA optimizer nor a biological
 validation or proof of fractal scaling. Multi-food adaptation can favor shared
 routes over the shortest route between one particular food pair.
 
@@ -74,7 +95,8 @@ routes over the shortest route between one particular food pair.
 | S / L | Save/load controls |
 
 The panel selects two or six foods, toggles graph/flow layers, and controls
-branching, nutrient bias, live-node budget, tip limit, and tube adaptation.
+branching, nutrient bias, live-node budget, tip limit, tube shortening, and
+hydraulic adaptation.
 **Max growing tips** is adjustable live from **1 to 128** without resetting the
 network. Lowering it immediately removes excess frontiers; raising it permits
 additional forks and food-site restarts. Other model changes restart growth;
@@ -113,9 +135,13 @@ ctest --test-dir build --output-on-failure
 
 Tests check a controlled parallel-tube network against analytic flows, reverse
 food supply roles, and verify that reinforcement moves transport to the shorter
-competing route. End-to-end checks cover node-level mass conservation, physical
+competing route regardless of which started thicker. They compare mature
+trunk shortening against a fixed skeleton and independently check food-pair
+averaging. An aggressive continuous-exploration fixture also verifies that
+the two-food backbone stays near the straight-line optimum and settles instead
+of cycling through inefficient new branches. End-to-end checks cover node-level mass conservation, physical
 flow/conductivity consistency, local growth and junction lengths, connected
-exploration history, exact food discovery, retained food connections, branching,
+working topology, exact food discovery, retained food connections, branching,
 reconnection, pruning, deterministic resets, and live-node budgets. A 5,000-step
 regression repeatedly reuses a 25-node capacity, and live tip-limit tests verify
 that changing the cap preserves the existing graph.
@@ -130,6 +156,7 @@ c++ -std=c++17 -O2 -Isrc tests/physarum.cpp src/PhysarumSimulation.cpp -o /tmp/p
 
 ## References
 
+- [Railway-network reference and model explanation](https://www.youtube.com/watch?v=Jt8qA-9z7XI).
 - [Reference video and creator description](https://www.youtube.com/shorts/PGH4C2rPiaM).
 - [Physarum Can Compute Shortest Paths](https://arxiv.org/abs/1106.0423), Bonifaci,
   Mehlhorn, and Varma: hydraulic flow and adaptive conductance in the Tero model.
