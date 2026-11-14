@@ -22,6 +22,25 @@ Position rotate(Position p, double angle) {
     return {p.x * std::cos(angle) - p.y * std::sin(angle), p.x * std::sin(angle) + p.y * std::cos(angle)};
 }
 bool inside(Position p) { return p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1; }
+bool trunksConflict(Position a, Position b, Position c, Position d) {
+    const auto ab = subtract(b, a), cd = subtract(d, c);
+    const double denominator = cross(ab, cd);
+    if (std::abs(denominator) > 1e-14) {
+        const double t = cross(subtract(c, a), cd) / denominator;
+        const double u = cross(subtract(c, a), ab) / denominator;
+        if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return true;
+    }
+    const auto squaredDistance = [](Position p, Position start, Position ray) {
+        const auto delta = subtract(p, start);
+        const double length2 = dot(ray, ray);
+        const double t = length2 > 0 ? std::clamp(dot(delta, ray) / length2, 0.0, 1.0) : 0;
+        const auto offset = subtract(delta, scale(ray, t));
+        return dot(offset, offset);
+    };
+    const double radius = PhysarumSimulation::contactRadius;
+    return std::min({squaredDistance(a, c, cd), squaredDistance(b, c, cd),
+                     squaredDistance(c, a, ab), squaredDistance(d, a, ab)}) <= radius * radius + 1e-16;
+}
 using Adjacency = std::vector<std::vector<std::pair<std::size_t, double>>>;
 Adjacency adjacency(const std::vector<PhysarumSimulation::Node>& nodes,
                     const std::vector<PhysarumSimulation::Edge>& edges) {
@@ -347,7 +366,7 @@ bool PhysarumSimulation::extend(Tip& tip) {
         // Otherwise the snap itself could pass through a tube without joining it.
         double nearest = contactRadius;
         for (std::size_t i = 0; i < nodes.size(); ++i) {
-            if (i == tip.node || adjacent(i)) continue;
+            if (nodes[i].slime != slime || i == tip.node || adjacent(i)) continue;
             const double d = distance(next, nodes[i].position);
             if (d < nearest && distance(from, nodes[i].position) <= maxStep) {
                 nearest = d; destination = i;
@@ -362,7 +381,7 @@ bool PhysarumSimulation::extend(Tip& tip) {
     const auto ray = subtract(next, from);
     for (std::size_t e = 0; e < edges.size(); ++e) {
         const auto& edge = edges[e];
-        if (!edge.active || edge.a == tip.node || edge.b == tip.node) continue;
+        if (!edge.active || nodes[edge.a].slime != slime || edge.a == tip.node || edge.b == tip.node) continue;
         const auto a = nodes[edge.a].position;
         const auto segment = subtract(nodes[edge.b].position, a);
         const double denominator = cross(ray, segment);
@@ -377,30 +396,8 @@ bool PhysarumSimulation::extend(Tip& tip) {
         }
         if (t > 1e-4 && t <= 1 && u >= 0 && u <= 1 && t < first) { first = t; hit = e; }
     }
-    // Foreign food/nodes/tips are swept obstacles too, including isolated food
-    // roots and head-on encounters that do not cross a tube's centerline.
-    bool foreignNode = false;
-    const double length2 = dot(ray, ray);
-    for (const auto& node : nodes) if (node.slime != slime) {
-        const auto offset = subtract(from, node.position);
-        const double c = dot(offset, offset) - contactRadius * contactRadius;
-        const double b = dot(offset, ray);
-        const double discriminant = b * b - length2 * c;
-        if (discriminant < 0) continue;
-        const double t = c <= 0 ? 0 : (-b - std::sqrt(discriminant)) / length2;
-        if (t >= 0 && t <= 1 && t < first) { first = t; foreignNode = true; }
-    }
-    if (foreignNode || (hit != noNode && nodes[edges[hit].a].slime != slime) ||
-        (hit == noNode && destination != noNode && nodes[destination].slime != slime)) {
-        const auto contact = first <= 1 ? add(from, scale(ray, first)) : next;
-        tip.active = false;
-        for (auto& other : tips) if (other.active && nodes[other.node].slime != slime &&
-            distance(nodes[other.node].position, contact) <= contactRadius + 1e-10) other.active = false;
-        // Termination never adds an edge, splits the foreign tube, or merges
-        // ownership. Its former exploring path can retire as an abandoned stub.
-        return true;
-    }
     const bool joining = hit != noNode || destination != noNode;
+    auto end = next;
     if (hit != noNode) {
         const auto intersection = add(from, scale(ray, first));
         const auto old = edges[hit];
@@ -408,9 +405,26 @@ bool PhysarumSimulation::extend(Tip& tip) {
             destination = old.a;
         else if (distance(intersection, nodes[old.b].position) < 1e-6 && distance(from, nodes[old.b].position) <= maxStep)
             destination = old.b;
-        else {
-            destination = splitTube(hit, distance(nodes[old.a].position, intersection) / old.length);
+        else destination = noNode;
+        end = destination == noNode ? intersection : nodes[destination].position;
+    }
+    // Stop before changing either graph. Only the actual extension up to an
+    // own-slime junction is tested; foreign explorers remain transparent.
+    for (const auto& trunk : edges) {
+        if (!trunk.active || trunk.state != TubeState::Established || nodes[trunk.a].slime == slime) continue;
+        const auto a = nodes[trunk.a].position, b = nodes[trunk.b].position;
+        if (std::max(from.x, end.x) + contactRadius < std::min(a.x, b.x) ||
+            std::min(from.x, end.x) - contactRadius > std::max(a.x, b.x) ||
+            std::max(from.y, end.y) + contactRadius < std::min(a.y, b.y) ||
+            std::min(from.y, end.y) - contactRadius > std::max(a.y, b.y)) continue;
+        if (trunksConflict(from, end, a, b)) {
+            tip.active = false;
+            return true;
         }
+    }
+    if (hit != noNode && destination == noNode) {
+        const auto& old = edges[hit];
+        destination = splitTube(hit, distance(nodes[old.a].position, end) / old.length);
     }
     if (destination == noNode) {
         destination = addNode(next, nodes[tip.node].pressure, slime);
@@ -470,7 +484,16 @@ void PhysarumSimulation::updateExploration() {
             if (!anchors[other] && degree[other] == 1) queue.push(other);
         }
     }
-    for (std::size_t e = 0; e < edges.size(); ++e) if (edges[e].active && !peeled[e]) edges[e].state = TubeState::Established;
+    std::vector<bool> pending(edges.size());
+    for (std::size_t e = 0; e < edges.size(); ++e)
+        pending[e] = edges[e].active && !peeled[e] && edges[e].state != TubeState::Established;
+    if (commitPromotions(pending, anchors)) {
+        // Rejected routes have been severed. Reclaim disconnected exploration
+        // and rebuild protection/food components before the hydraulic solve.
+        retire();
+        updateExploration();
+        return;
+    }
     for (const auto& edge : edges) if (edge.active && edge.state == TubeState::Established)
         anchors[edge.a] = anchors[edge.b] = true;
 
@@ -499,6 +522,75 @@ void PhysarumSimulation::updateExploration() {
     }
     for (std::size_t e = 0; e < edges.size(); ++e) if (edges[e].active && edges[e].state != TubeState::Established)
         edges[e].state = protectedEdge[e] ? TubeState::Exploring : TubeState::Abandoned;
+}
+
+bool PhysarumSimulation::commitPromotions(const std::vector<bool>& pending, const std::vector<bool>& anchors) {
+    if (std::none_of(pending.begin(), pending.end(), [](bool candidate) { return candidate; })) return false;
+    if (slimes.size() == 1) {
+        for (std::size_t e = 0; e < edges.size(); ++e) if (pending[e]) edges[e].state = TubeState::Established;
+        return false;
+    }
+    constexpr int resolution = 64;
+    const auto cell = [](double coordinate) { return std::clamp(int(std::floor(coordinate * resolution)), 0, resolution - 1); };
+    std::vector<std::vector<std::size_t>> bins(resolution * resolution), incident(nodes.size());
+    const auto insert = [&](std::size_t e) {
+        const auto a = nodes[edges[e].a].position, b = nodes[edges[e].b].position;
+        for (int y = cell(std::min(a.y, b.y)); y <= cell(std::max(a.y, b.y)); ++y)
+            for (int x = cell(std::min(a.x, b.x)); x <= cell(std::max(a.x, b.x)); ++x)
+                bins[y * resolution + x].push_back(e);
+    };
+    for (std::size_t e = 0; e < edges.size(); ++e) {
+        if (edges[e].active && edges[e].state == TubeState::Established) insert(e);
+        if (pending[e]) { incident[edges[e].a].push_back(e); incident[edges[e].b].push_back(e); }
+    }
+    std::vector<bool> processed(edges.size());
+    std::vector<unsigned> checked(edges.size());
+    unsigned stamp = 0;
+    bool rejected = false;
+    // Existing trunks have priority. Simultaneous claims use a rotating slime
+    // order; an accepted route becomes an obstacle for subsequent claims.
+    for (std::size_t offset = 0; offset < slimes.size(); ++offset) {
+        const auto slime = (iteration + offset) % slimes.size();
+        for (std::size_t start = 0; start < edges.size(); ++start) {
+            if (!pending[start] || processed[start] || nodes[edges[start].a].slime != slime) continue;
+            std::vector<std::size_t> route;
+            std::queue<std::size_t> queue;
+            queue.push(start); processed[start] = true;
+            while (!queue.empty()) {
+                const auto e = queue.front(); queue.pop(); route.push_back(e);
+                for (auto node : {edges[e].a, edges[e].b}) if (!anchors[node])
+                    for (auto neighbor : incident[node]) if (!processed[neighbor]) {
+                        processed[neighbor] = true; queue.push(neighbor);
+                    }
+            }
+            bool conflict = false;
+            for (auto e : route) {
+                ++stamp;
+                const auto a = nodes[edges[e].a].position, b = nodes[edges[e].b].position;
+                for (int y = cell(std::min(a.y, b.y) - contactRadius); y <= cell(std::max(a.y, b.y) + contactRadius) && !conflict; ++y)
+                    for (int x = cell(std::min(a.x, b.x) - contactRadius); x <= cell(std::max(a.x, b.x) + contactRadius) && !conflict; ++x)
+                        for (auto other : bins[y * resolution + x]) {
+                            if (checked[other] == stamp) continue;
+                            checked[other] = stamp;
+                            const auto& trunk = edges[other];
+                            if (nodes[trunk.a].slime == slime) continue;
+                            if (trunksConflict(a, b, nodes[trunk.a].position, nodes[trunk.b].position)) { conflict = true; break; }
+                        }
+                if (conflict) break;
+            }
+            if (conflict) {
+                rejected = true;
+                for (auto e : route) {
+                    edges[e].active = false; edges[e].state = TubeState::Abandoned;
+                    edges[e].flow = edges[e].foodLoad = 0;
+                }
+            } else for (auto e : route) {
+                edges[e].state = TubeState::Established;
+                insert(e);
+            }
+        }
+    }
+    return rejected;
 }
 
 void PhysarumSimulation::adaptTubes(std::vector<Edge>& tubes, const Settings& settings, unsigned iteration) {

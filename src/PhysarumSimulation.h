@@ -110,6 +110,7 @@ private:
     void grow();
     bool extend(Tip& tip);
     void updateExploration();
+    bool commitPromotions(const std::vector<bool>& pending, const std::vector<bool>& anchors);
     void coalesceSproutJunctions();
     void retire();
     void transport();

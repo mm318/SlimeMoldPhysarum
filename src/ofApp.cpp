@@ -91,7 +91,7 @@ void ofApp::draw() {
     ofSetColor(228, 234, 202);
     ofDrawBitmapString("TEN SLIMES / COMPETING FLOW NETWORKS", 24, 28);
     ofSetColor(133, 153, 127);
-    ofDrawBitmapString("Own branches join. Foreign contact ends a tip. Opposing tips annihilate.", 24, 50);
+    ofDrawBitmapString("Explorers cross explorers. Foreign trunks block growth and promotion.", 24, 50);
     ofFill();
     ofSetColor(10, 21, 14);
     ofDrawRectangle(left, top, side, side);

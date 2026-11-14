@@ -16,7 +16,8 @@ the same food counts, positions, and growth.
 Every food is a permanent root belonging to one slime. Each slime has a distinct
 color shared by its foods, branches, tips, and retired trails. Labels such as
 `3B` identify food B of slime 3. Each food starts with no edges. There are no
-fixed obstacles; other slimes' live objects block exploration.
+fixed obstacles. Explorers can cross foreign explorers, but established
+foreign trunks block both new growth and later trunk promotions.
 
 Every branch extension and merging connection is at most **`0.01` units in
 Euclidean length**. Fronts belonging to the same slime can meet between its
@@ -51,16 +52,36 @@ target after its colonies connect. Growth order rotates to share the node cap.
 
 Contacts obey ownership:
 
-- Same-slime tips join and both finish. Their paths enter hydraulic adaptation.
-- A tip joining its own slime's branch finishes; the other tip keeps growing.
-  Only its distal portion beyond the junction remains protected exploration.
-- Contact with a foreign tube, exploring branch, node, or food ends the incoming
-  tip without adding a connection or splitting the foreign object.
-- Two foreign tips meeting are both annihilated. Their networks stay separate.
+- Same-slime tips join and both finish, proposing a new transport route.
+- An accepted own-branch join finishes the incoming tip; the other tip keeps
+  growing on its protected distal portion beyond the junction.
+- Foreign explorers pass through each other, including tip-to-tip encounters.
+  They can pass isolated foreign food roots without claiming them. Crossings
+  never create shared nodes or hydraulic links.
+- An extension that would touch a foreign established trunk ends its incoming
+  tip immediately. No crossing segment is added, and the foreign trunk and its
+  frontiers stay unchanged. Checks use the actual segment up to any earlier
+  own-slime junction, not the unused remainder of the proposed heading.
 
-Foreign nodes and food roots use a swept contact radius of `0.0035`, so a tip
-cannot jump over a foreign point between frames. Tubes also block crossing
-segments. The terminating tip adds no final segment into the foreign object.
+Promotion also checks the entire proposed route, including earlier segments.
+This catches crossings made while the foreign route was still exploring,
+before it gained trunk priority. The existing trunk keeps its claim.
+Only active established foreign trunks block promotion; foreign explorers,
+isolated foods, abandoned branches, and retired trails do not reserve space.
+Crossing, overlapping, or approaching a foreign trunk within `0.0035` units
+blocks new extensions and rejects conflicting promotion proposals.
+
+The first established route keeps priority. A rejected route is annihilated
+without entering the hydraulic solve, and its nodes release live capacity.
+Explorers that become disconnected from every own food also disappear;
+unrelated rooted frontiers survive. Successful promotion does not immediately
+kill crossing foreign explorers. They remain alive until their own promotion
+attempt, which then encounters the earlier claim. Simultaneous proposals use
+a rotating slime order to select a reproducible winner.
+
+A spatial index contains only claimed trunks for promotion checks. Extension
+checks skip foreign explorers and discard distant trunk bounding boxes before
+testing the remaining geometry.
 Forks retain protection on paths still leading to surviving tips. Losing a tip
 releases its unshared exploring path for abandonment and eventual retirement.
 
@@ -103,7 +124,7 @@ lead to active tips. Exploration continues after a slime's foods connect,
 including lateral probes from established trunks. It is bounded by the tip and
 live-node caps, with no age, distance, or step-count limit for a growing branch.
 
-After contact, the newly established route loses exploration protection and
+After accepted promotion, the new route loses exploration protection and
 its flow follows its resistance and the solved pressures. Food transport alone
 determines its thickening or thinning. Weak tubes must remain weak for 24
 consecutive adaptation steps before removal. Thin routes gaining useful
@@ -140,7 +161,7 @@ closest historical gap between that slime's first two food colonies.
 
 Growth, protection, and competition are custom visualization choices. This is
 neither the 2020 numerical SMA optimizer nor biological validation or proof of
-fractal scaling. Results depend on explored connections and foreign barriers;
+fractal scaling. Results depend on explored connections and trunk claims;
 three-food adaptation can favor shared routes over a particular pair's shortest
 route.
 
@@ -203,9 +224,12 @@ Independent pairwise solves check the production food-flow average.
 
 Controlled contacts verify that tip-to-tip fusion consumes both tips and an
 interior branch contact preserves only the other tip's distal exploring subset.
-Foreign-contact cases cover head-on annihilation, exploring branches,
-established trunks, and isolated foods, checking that foreign geometry remains
-unchanged. A ten-slime run checks random food ownership, own-food targeting,
+Foreign-contact cases verify passage through explorers and isolated foods,
+immediate blocking at foreign trunks, and valid own-slime joins before a
+blocker. Promotion cases cover earlier crossings,
+rollback and node reclamation, survival of unrelated probes, simultaneous
+claims, overlap, endpoint contact, and nearby non-conflicting routes. A
+ten-slime run checks random food ownership, own-food targeting,
 independent tip caps, permanent sources, mass conservation, and the absence of
 cross-slime edges. Isolated fixtures check zero-flow exploration, shared forks,
 short-route competition, and junction geometry. A 5,000-step regression

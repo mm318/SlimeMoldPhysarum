@@ -24,19 +24,24 @@ struct PhysarumSimulationTestAccess {
     }
     static void load(S& s, std::vector<S::Node> nodes,
                      const std::vector<std::pair<std::size_t, std::size_t>>& links,
-                     std::vector<S::Tip> tips) {
+                     std::vector<S::Tip> tips, const std::vector<std::size_t>& sources = {0, 1}, unsigned phase = 100) {
         S::Settings settings;
         seed(s, settings, 2026);
         s.nodes = std::move(nodes); s.edges.clear(); s.rebuildComponents();
-        s.foods = {{s.nodes[0].position, 0, s.nodes[0].slime}, {s.nodes[1].position, 1, s.nodes[1].slime}};
-        s.slimes.assign(std::max(s.nodes[0].slime, s.nodes[1].slime) + 1, {});
+        s.foods.clear();
+        unsigned owners = 0;
+        for (auto node : sources) {
+            s.foods.push_back({s.nodes[node].position, node, s.nodes[node].slime});
+            owners = std::max(owners, s.nodes[node].slime + 1);
+        }
+        s.slimes.assign(owners, {});
         for (std::size_t f = 0; f < s.foods.size(); ++f) s.slimes[s.foods[f].slime].foods.push_back(f);
         for (auto& slime : s.slimes) slime.history.assign(1, 0);
         s.spawnCredits.assign(s.slimes.size(), 0);
         s.tips = std::move(tips); s.tips.reserve(settings.maxTips * s.slimes.size());
         for (auto link : links) if (!s.addEdge(link.first, link.second))
             throw std::runtime_error("Invalid contact fixture");
-        s.iteration = 100;
+        s.iteration = phase;
         s.updateExploration(); s.transport();
     }
     static bool extend(S& s, std::size_t tip) {
@@ -384,10 +389,10 @@ void checkForeignContacts() {
                  {{0, 2}, {2, 3}, {1, 4}, {4, 5}},
                  {{3, Simulation::noNode, 0, {1, 0}, 1}, {5, Simulation::noNode, 1, {-1, 0}, 1}});
     require(!Access::addEdge(headOn, 3, 5), "The graph must reject a short edge between different slimes");
-    require(Access::extend(headOn, 0) && !headOn.getTips()[0].active && !headOn.getTips()[1].active,
-            "Opposing foreign tips must both be annihilated, including collinear encounters");
-    require(headOn.getNodes().size() == 6 && headOn.getEdges().size() == 4 && headOn.getFoodGroups() == 2,
-            "Foreign tip collision must leave the colonies disconnected without adding or splitting tubes");
+    require(Access::extend(headOn, 0) && Access::extend(headOn, 1) && headOn.getTips()[0].active && headOn.getTips()[1].active,
+            "Opposing foreign explorers must pass through each other without annihilation");
+    require(headOn.getNodes().size() == 8 && headOn.getEdges().size() == 6 && headOn.getFoodGroups() == 2,
+            "Crossing explorers must extend their own separate layers without shared nodes or tubes");
 
     for (bool established : {false, true}) {
         Simulation body;
@@ -398,10 +403,10 @@ void checkForeignContacts() {
                      {{3, Simulation::noNode, 0, {1, 0}, 1}, {7, Simulation::noNode, 1, {0, 1}, 1}});
         if (established) Access::establishSlime(body, 1);
         const auto before = body.getEdges();
-        require(Access::extend(body, 0) && !body.getTips()[0].active && body.getTips()[1].active,
-                "A foreign branch/trunk collision must terminate only the incoming tip");
-        require(body.getNodes().size() == 8 && body.getEdges().size() == 6 && body.getFoodGroups() == 2,
-                "A foreign body must never be split into a shared hydraulic junction");
+        require(Access::extend(body, 0) && body.getTips()[0].active == !established && body.getTips()[1].active,
+                "An explorer must pass foreign explorers but terminate immediately at an established foreign trunk");
+        require(body.getNodes().size() == (established ? 8u : 9u) && body.getEdges().size() == (established ? 6u : 7u) && body.getFoodGroups() == 2,
+                "A blocked extension must add no segment, split no foreign tube, and create no shared junction");
         for (std::size_t e = 2; e < before.size(); ++e) {
             const auto& after = body.getEdges()[e];
             require(after.a == before[e].a && after.b == before[e].b && after.length == before[e].length &&
@@ -413,8 +418,124 @@ void checkForeignContacts() {
     Simulation food;
     Access::load(food, {{{0.48, 0.5}}, {{0.505, 0.5}, 0, 0, 1}, {{0.49, 0.5}}, {{0.499, 0.5}}},
                  {{0, 2}, {2, 3}}, {{3, Simulation::noNode, 0, {1, 0}, 1}});
-    require(Access::extend(food, 0) && !food.getTips()[0].active && food.getNodes().size() == 4 && food.getEdges().size() == 2,
-            "An isolated foreign food source must block a tip without being claimed or connected");
+    require(Access::extend(food, 0) && food.getTips()[0].active && food.getNodes().size() == 5 && food.getEdges().size() == 3 &&
+            food.getNodes()[food.getTips()[0].node].slime == 0 && food.getFoods()[1].slime == 1,
+            "Passing foreign food must neither stop exploration nor claim the food");
+}
+
+void checkForeignTrunkBlocking() {
+    using Access = PhysarumSimulationTestAccess;
+    Simulation headOn;
+    Access::load(headOn, {{{0.48, 0.5}}, {{0.524, 0.5}, 0, 0, 1}, {{0.49, 0.5}}, {{0.499, 0.5}},
+                          {{0.514, 0.5}, 0, 0, 1}, {{0.505, 0.5}, 0, 0, 1}},
+                 {{0, 2}, {2, 3}, {1, 4}, {4, 5}},
+                 {{3, Simulation::noNode, 0, {1, 0}, 1}, {5, Simulation::noNode, 1, {-1, 0}, 1}});
+    Access::establishSlime(headOn, 1);
+    require(Access::extend(headOn, 0) && !headOn.getTips()[0].active && headOn.getTips()[1].active &&
+            headOn.getNodes().size() == 6 && headOn.getEdges().size() == 4,
+            "Collinear contact with a foreign trunk endpoint must stop only the incoming explorer");
+
+    // An own-slime junction truncates the proposed movement before the blocker.
+    // Testing the untruncated heading would incorrectly reject this valid join.
+    Simulation clipped;
+    Access::load(clipped, {{{0.47, 0.5}}, {{0.495, 0.48}}, {{0.5, 0.49}, 0, 0, 1}, {{0.5, 0.51}, 0, 0, 1},
+                           {{0.48, 0.5}}, {{0.49, 0.5}}, {{0.495, 0.49}}, {{0.495, 0.5}}, {{0.5, 0.5}, 0, 0, 1}},
+                 {{0, 4}, {4, 5}, {1, 6}, {6, 7}, {2, 8}, {8, 3}},
+                 {{5, 1, 0, {1, 0}, 1}, {7, 0, 1, {0, 1}, 1}}, {0, 1, 2, 3});
+    require(Access::extend(clipped, 0) && clipped.getFoodGroups(0) == 1 && clipped.getFoodGroups(1) == 1,
+            "An own-slime join before a foreign trunk must succeed when the actual connecting segment is clear");
+}
+
+void checkDeferredPromotions() {
+    using Access = PhysarumSimulationTestAccess;
+    using State = Simulation::TubeState;
+    const std::vector<Simulation::Node> nodes{
+        {{0.48, 0.5}}, {{0.524, 0.5}}, {{0.495, 0.48}, 0, 0, 1}, {{0.495, 0.536}, 0, 0, 1},
+        {{0.49, 0.5}}, {{0.499, 0.5}}, {{0.514, 0.5}}, {{0.505, 0.5}},
+        {{0.495, 0.49}, 0, 0, 1}, {{0.495, 0.50}, 0, 0, 1}, {{0.495, 0.51}, 0, 0, 1},
+        {{0.495, 0.526}, 0, 0, 1}, {{0.495, 0.516}, 0, 0, 1}};
+    const std::vector<std::pair<std::size_t, std::size_t>> partial{
+        {0, 4}, {4, 5}, {1, 6}, {6, 7}, {2, 8}, {8, 9}, {9, 10}, {3, 11}, {11, 12}};
+    const std::vector<Simulation::Tip> tips{
+        {5, 1, 0, {1, 0}, 1}, {7, 0, 1, {-1, 0}, 1}, {10, 3, 2, {0, 1}, 1}, {12, 2, 3, {0, -1}, 1}};
+    Simulation layered;
+    Access::load(layered, nodes, partial, tips, {0, 1, 2, 3});
+    require(Access::extend(layered, 0) && layered.getFoodGroups(0) == 1 && layered.getFoodGroups(1) == 2,
+            "A first promotion must succeed through a foreign exploring branch");
+    require(layered.getTips()[2].active && layered.getTips()[3].active,
+            "Claiming a trunk must leave crossing foreign explorers alive until their own promotion");
+    const auto before = layered.getNodes().size();
+    require(Access::extend(layered, 2), "A crossing explorer must be able to attempt its own same-slime connection");
+    require(layered.getFoodGroups(0) == 1 && layered.getFoodGroups(1) == 2 && layered.getNodes().size() < before,
+            "A later conflicting promotion must be rolled back and reclaim its route capacity");
+    for (const auto& edge : layered.getEdges())
+        require(layered.getNodes()[edge.a].slime == 0 && edge.state == State::Established,
+                "The first committed trunk must survive while the later conflicting route is annihilated");
+    require(layered.getTips().empty() && layered.getBalanceError() < 1e-8,
+            "Rejected route descendants must not remain as unsupported tips or enter the pressure solve");
+
+    // The crossing is behind the advancing tip, not on its final connecting
+    // segment. Promotion must validate every segment of the proposed route.
+    Simulation oldCrossing;
+    auto completeForeign = partial; completeForeign.push_back({10, 12});
+    auto sideNodes = nodes;
+    const auto side = sideNodes.size(); sideNodes.push_back({{0.47, 0.5}});
+    completeForeign.push_back({0, side});
+    Access::load(oldCrossing, sideNodes, completeForeign,
+                 {tips[0], tips[1], {side, 1, 0, {-1, 0}, 1}}, {0, 1, 2, 3});
+    require(oldCrossing.getFoodGroups(1) == 1 && oldCrossing.getFoodGroups(0) == 2,
+            "The foreign obstacle must already be established in the rollback fixture");
+    require(Access::extend(oldCrossing, 0) && oldCrossing.getFoodGroups(0) == 2,
+            "A previously explored crossing must invalidate promotion even if the final connecting segment is clear");
+    for (const auto& edge : oldCrossing.getEdges())
+        require((oldCrossing.getNodes()[edge.a].slime == 1 && edge.state == State::Established) ||
+                (oldCrossing.getNodes()[edge.a].slime == 0 && edge.state == State::Exploring),
+                "Rejected exploration must leave the existing foreign trunk and unrelated probes intact");
+    require(oldCrossing.getTips().size() == 1 && oldCrossing.getNodes()[oldCrossing.getTips()[0].node].position == Simulation::Position{0.47, 0.5},
+            "Promotion rejection must not annihilate an unrelated frontier rooted at the same food");
+
+    auto completeBoth = partial; completeBoth.push_back({10, 12}); completeBoth.push_back({5, 7});
+    for (unsigned phase : {100u, 101u}) {
+        Simulation simultaneous;
+        Access::load(simultaneous, nodes, completeBoth, {}, {0, 1, 2, 3}, phase);
+        const auto winner = phase % 2;
+        require(simultaneous.getFoodGroups(winner) == 1 && simultaneous.getFoodGroups(1 - winner) == 2,
+                "Simultaneous conflicting promotions must select one winner using rotating slime priority");
+    }
+}
+
+void checkPromotionGeometry() {
+    using Position = Simulation::Position;
+    const auto fixture = [](Simulation& simulation, Position a, Position b, Position c, Position d) {
+        std::vector<Simulation::Node> nodes{{a}, {b}, {c, 0, 0, 1}, {d, 0, 0, 1}};
+        std::vector<std::pair<std::size_t, std::size_t>> links;
+        for (unsigned owner = 0; owner < 2; ++owner) {
+            const auto start = owner * 2, end = start + 1;
+            const auto p = nodes[start].position, q = nodes[end].position;
+            const auto steps = unsigned(std::ceil(Simulation::distance(p, q) / Simulation::maxStep));
+            std::size_t previous = start;
+            for (unsigned i = 1; i < steps; ++i) {
+                const auto node = nodes.size();
+                nodes.push_back({{p.x + (q.x - p.x) * i / steps, p.y + (q.y - p.y) * i / steps}, 0, 0, owner});
+                links.push_back({previous, node}); previous = node;
+            }
+            links.push_back({previous, end});
+        }
+        PhysarumSimulationTestAccess::load(simulation, std::move(nodes), links, {}, {0, 1, 2, 3});
+    };
+    for (const auto& endpoints : {
+        std::pair<Position, Position>{{0.5, 0.48}, {0.5, 0.52}},
+        {{0.49, 0.5}, {0.53, 0.5}}, {{0.52, 0.5}, {0.52, 0.54}},
+        {{0.48, 0.502}, {0.52, 0.502}}}) {
+        Simulation collision;
+        fixture(collision, {0.48, 0.5}, {0.52, 0.5}, endpoints.first, endpoints.second);
+        require(collision.getFoodGroups(0) == 1 && collision.getFoodGroups(1) == 2,
+                "Promotion checks must catch crossing, collinear overlap, endpoint contact, and close parallel tubes");
+    }
+    Simulation separated;
+    fixture(separated, {0.48, 0.5}, {0.52, 0.5}, {0.48, 0.505}, {0.52, 0.505});
+    require(separated.getFoodGroups(0) == 1 && separated.getFoodGroups(1) == 1,
+            "Nearby spatial-index entries must not reject geometrically separate routes");
 }
 
 void checkTenSlimes() {
@@ -726,6 +847,9 @@ int main() {
         checkRouteFairness();
         checkContactSemantics();
         checkForeignContacts();
+        checkForeignTrunkBlocking();
+        checkDeferredPromotions();
+        checkPromotionGeometry();
         checkSharedForkProtection();
         checkDistributedSpawning();
         checkLongGrowthAndFusion();
