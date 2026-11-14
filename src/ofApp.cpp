@@ -19,10 +19,8 @@ void ofApp::setup() {
     controls.add(showTips.set("Show growing tips", true));
     controls.add(showFlow.set("Show transport flow", true));
     controls.add(stepsPerFrame.set("Steps per frame", 1, 1, 8));
-    controls.add(iterationLimit.set("Step limit", 1200, 200, 3000));
-    controls.add(growthSteps.set("Growth steps", 400, 100, 1000));
-    controls.add(nodeLimit.set("Node budget", 1800, 300, 5000));
-    controls.add(tipLimit.set("Max growing tips", 18, 3, 48));
+    controls.add(nodeLimit.set("Live node budget", 1800, 300, 5000));
+    controls.add(tipLimit.set("Max growing tips", 18, 1, 128));
     controls.add(branching.set("Branching probability", 0.055f, 0.0f, 0.2f));
     controls.add(foodBias.set("Food growth bias", 0.32f, 0.0f, 0.5f));
     controls.add(adaptation.set("Tube adaptation rate", 0.035f, 0.005f, 0.2f));
@@ -34,7 +32,6 @@ void ofApp::setup() {
 PhysarumSimulation::Settings ofApp::parameters() const {
     PhysarumSimulation::Settings s;
     const auto value = [](float x) { return std::round(double(x) * 1e6) / 1e6; };
-    s.iterations = iterationLimit; s.growthSteps = growthSteps;
     s.maxNodes = nodeLimit; s.maxTips = tipLimit;
     s.branching = value(branching); s.foodBias = value(foodBias);
     s.adaptation = value(adaptation); s.reinforcement = value(reinforcement);
@@ -51,11 +48,11 @@ void ofApp::reset() {
 void ofApp::update() {
     const auto s = parameters();
     const auto& current = simulation.getSettings();
-    if (s.iterations != current.iterations || s.growthSteps != current.growthSteps ||
-        s.maxNodes != current.maxNodes || s.maxTips != current.maxTips ||
+    if (s.maxNodes != current.maxNodes ||
         s.branching != current.branching || s.foodBias != current.foodBias ||
         s.adaptation != current.adaptation || s.reinforcement != current.reinforcement || s.sixFoods != current.sixFoods)
         reset();
+    else if (s.maxTips != current.maxTips) simulation.setTipLimit(s.maxTips);
     if (!paused || singleStep) {
         const int count = singleStep ? 1 : stepsPerFrame.get();
         for (int i = 0; i < count; ++i) {
@@ -103,6 +100,9 @@ void ofApp::draw() {
         const double thickness = std::clamp(std::sqrt(edge.conductivity / 1.1), 0.0, 1.0);
         auto& mesh = tubes[std::min(8, int(thickness * 8))];
         mesh.addVertex(a); mesh.addVertex(b);
+    }
+    if (showExploration) for (const auto& edge : simulation.getRetiredEdges()) {
+        explored.addVertex(screen(edge.a)); explored.addVertex(screen(edge.b));
     }
     ofSetLineWidth(0.7f);
     ofSetColor(71, 96, 66, 72);
@@ -165,13 +165,13 @@ void ofApp::draw() {
     gui.setPosition(width + 10, 10);
     gui.draw();
     const float textTop = gui.getHeight() + 30;
-    const bool growing = simulation.getIteration() < unsigned(growthSteps.get()) && nodes.size() < std::size_t(nodeLimit.get());
+    const bool growing = nodes.size() < std::size_t(nodeLimit.get());
     const double path = simulation.getConnectionLength();
     std::ostringstream text;
-    text << (paused ? "Paused" : simulation.finished() ? "Simulation complete" : growing ? "Exploring / growing" : "Adapting transport tubes")
-         << "\nStep " << simulation.getIteration() << " / " << iterationLimit
+    text << (paused ? "Paused" : growing ? "Exploring / adapting" : "Node budget full / adapting")
+         << "\nStep " << simulation.getIteration()
          << "\nFoods reached: " << simulation.getReachedFoods() << " / " << simulation.getFoods().size()
-         << "\nNodes: " << nodes.size() << " / " << nodeLimit
+         << "\nLive nodes: " << nodes.size() << " / " << nodeLimit
          << "\nActive tubes: " << simulation.getActiveEdges()
          << "\nGrowing tips: " << simulation.getTips().size()
          << std::fixed << std::setprecision(4)
@@ -187,13 +187,13 @@ void ofApp::draw() {
     const float chartTop = textTop + 230, chartWidth = guiWidth - 36, chartHeight = 75;
     if (chartTop + chartHeight + 25 < height) {
         ofSetColor(133, 153, 127);
-        ofDrawBitmapString("Closest growth to food B", width + 12, chartTop - 12);
+        ofDrawBitmapString("Recent approach to food B", width + 12, chartTop - 12);
         ofSetColor(29, 42, 30); ofDrawRectangle(width + 12, chartTop, chartWidth, chartHeight);
         ofPolyline curve;
         const auto& history = simulation.getHistory();
         for (std::size_t i = 0; i < history.size(); ++i)
-            curve.addVertex(width + 12 + chartWidth * i / iterationLimit.get(),
-                            chartTop + chartHeight * (1 - history[i] / history.front()));
+            curve.addVertex(width + 12 + chartWidth * i / std::max<std::size_t>(1, history.size() - 1),
+                            chartTop + chartHeight * (1 - history[i] / PhysarumSimulation::distance(PhysarumSimulation::start, PhysarumSimulation::goal)));
         ofSetColor(222, 222, 99); ofSetLineWidth(1); curve.draw();
     }
     ofPopStyle();

@@ -58,7 +58,7 @@ PhysarumSimulation::Position PhysarumSimulation::randomDirection() {
 }
 
 void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
-    if (s.iterations == 0 || s.growthSteps == 0 || s.maxNodes < 2 || s.maxNodes > 10000 ||
+    if (s.maxNodes < 2 || s.maxNodes > 10000 ||
         s.maxTips == 0 || s.maxTips > 128 || !std::isfinite(s.branching) || s.branching < 0 || s.branching > 1 ||
         !std::isfinite(s.foodBias) || s.foodBias < 0 || s.foodBias > 1 ||
         !std::isfinite(s.adaptation) || s.adaptation <= 0 || s.adaptation > 1 ||
@@ -69,7 +69,7 @@ void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
     iteration = 0;
     balanceError = 0;
     nodes = {{start, 0, 0, true}};
-    edges.clear(); tips.clear();
+    edges.clear(); tips.clear(); retired.clear();
     tips.reserve(settings.maxTips);
     foods = {{start, 0}, {goal, noNode}};
     if (settings.sixFoods) {
@@ -82,6 +82,14 @@ void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
     }
     injections.assign(1, 0);
     history.assign(1, distance(start, goal));
+}
+
+void PhysarumSimulation::setTipLimit(unsigned limit) {
+    if (limit == 0 || limit > 128) throw std::invalid_argument("Tip limit must be between 1 and 128");
+    settings.maxTips = limit;
+    tips.reserve(limit);
+    if (tips.size() > limit) tips.resize(limit);
+    if (!nodes.empty()) transport();
 }
 
 std::size_t PhysarumSimulation::chooseTarget(std::size_t node, Position direction, std::size_t avoid) const {
@@ -203,9 +211,9 @@ bool PhysarumSimulation::extend(Tip& tip) {
 }
 
 void PhysarumSimulation::grow() {
-    if (iteration >= settings.growthSteps || nodes.size() >= settings.maxNodes) {
-        tips.clear(); return;
-    }
+    // A full live-node budget pauses expansion, not the lifetime of its tips.
+    // Pruning can release capacity and let surviving frontiers resume later.
+    if (nodes.size() >= settings.maxNodes) return;
     const std::size_t count = tips.size();
     for (std::size_t i = 0; i < count && nodes.size() < settings.maxNodes; ++i) {
         auto& tip = tips[i];
@@ -241,13 +249,51 @@ void PhysarumSimulation::adapt() {
     }
 }
 
+void PhysarumSimulation::retire() {
+    const auto alive = reachable(adjacency(nodes, edges));
+    std::vector<std::size_t> remap(nodes.size(), noNode);
+    std::vector<Node> liveNodes;
+    std::vector<Edge> liveEdges;
+    liveNodes.reserve(nodes.size());
+    liveEdges.reserve(edges.size());
+    // The reference seed is always retained, even when every tube has died.
+    // All other nodes need a live connection to it to consume node capacity.
+    for (std::size_t i = 0; i < nodes.size(); ++i) if (alive[i]) {
+        remap[i] = liveNodes.size();
+        liveNodes.push_back(nodes[i]);
+        liveNodes.back().connected = true;
+    }
+    for (const auto& edge : edges) {
+        if (edge.active && alive[edge.a] && alive[edge.b]) {
+            auto tube = edge;
+            tube.a = remap[edge.a]; tube.b = remap[edge.b];
+            liveEdges.push_back(tube);
+        } else {
+            retired.push_back({nodes[edge.a].position, nodes[edge.b].position});
+            if (retired.size() > retiredHistoryLimit) retired.pop_front();
+        }
+    }
+    tips.erase(std::remove_if(tips.begin(), tips.end(), [&](const Tip& tip) {
+        return !tip.active || remap[tip.node] == noNode;
+    }), tips.end());
+    for (auto& tip : tips) {
+        tip.node = remap[tip.node];
+        if (tip.previous != noNode) tip.previous = remap[tip.previous];
+    }
+    for (auto& food : foods) if (food.node != noNode) food.node = remap[food.node];
+    nodes.swap(liveNodes);
+    edges.swap(liveEdges);
+}
+
 void PhysarumSimulation::transport() {
     const auto connected = reachable(adjacency(nodes, edges));
     for (std::size_t i = 0; i < nodes.size(); ++i) nodes[i].connected = connected[i];
     tips.erase(std::remove_if(tips.begin(), tips.end(), [&](const Tip& tip) { return !connected[tip.node]; }), tips.end());
     std::vector<std::size_t> ports, growing;
     for (const auto& food : foods) if (food.node != noNode && connected[food.node]) ports.push_back(food.node);
-    for (const auto& tip : tips) if (connected[tip.node] &&
+    // A blocked frontier is not extending tissue, so it does not draw extra
+    // growth flow. Unused branches may then retire and release node capacity.
+    for (const auto& tip : tips) if (nodes.size() < settings.maxNodes && connected[tip.node] &&
         std::find(ports.begin(), ports.end(), tip.node) == ports.end()) growing.push_back(tip.node);
     injections.assign(nodes.size(), 0);
     if (ports.size() > 1) {
@@ -339,9 +385,10 @@ double PhysarumSimulation::solveFlow(std::vector<Node>& points, std::vector<Edge
 }
 
 bool PhysarumSimulation::step() {
-    if (nodes.empty() || finished()) return false;
-    grow();
+    if (nodes.empty()) return false;
     adapt();
+    retire();
+    grow();
     transport();
     ++iteration;
     measure();
@@ -352,6 +399,7 @@ void PhysarumSimulation::measure() {
     double closest = history.back();
     for (const auto& node : nodes) closest = std::min(closest, distance(node.position, goal));
     history.push_back(closest);
+    if (history.size() > progressHistoryLimit) history.pop_front();
 }
 unsigned PhysarumSimulation::getReachedFoods() const {
     return std::count_if(foods.begin(), foods.end(), [](const Food& food) { return food.node != noNode; });

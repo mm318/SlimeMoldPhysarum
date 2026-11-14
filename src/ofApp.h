@@ -18,7 +18,7 @@ private:
     PhysarumSimulation simulation;
     ofxPanel gui;
     ofParameterGroup controls;
-    ofParameter<int> iterationLimit, growthSteps, nodeLimit, tipLimit, stepsPerFrame;
+    ofParameter<int> nodeLimit, tipLimit, stepsPerFrame;
     ofParameter<float> branching, foodBias, adaptation, reinforcement;
     ofParameter<bool> paused, sixFoods, showExploration, showNodes, showTips, showFlow;
     unsigned seed = 2026;

@@ -23,8 +23,15 @@ The graph never begins with a hidden skeleton or a precomputed route.
 Persistent tips extend short segments, occasionally sprout side branches, and
 have a modest directional bias toward unreached food. A crossing splits an
 existing tube into a real junction; nearby tips can also join existing nodes.
-Growth stops at the growth-step or node budget, after which transport continues
-to adapt the network.
+Growth has no step or duration limit. The node budget counts only the current
+live network. When a tube retires, nodes with no remaining live connection are
+removed from the working graph, freeing capacity. Shared junctions remain while
+another live tube still uses them. The seed always occupies one slot.
+
+A full budget pauses extensions while existing food-to-food transport and tube
+adaptation continue. Blocked frontiers stop drawing exploratory growth flow, so
+unused branches can weaken. Growth resumes when pruning frees space. Surviving
+tips wait for room; if all tips die, reached food sites can launch new ones.
 
 Each tube has a length `L`, conductivity `D`, and signed flow `Q`. At every step,
 a sparse, grounded graph-Laplacian solve computes node pressures and flows:
@@ -43,7 +50,10 @@ The pressure solve uses Jacobi-preconditioned conjugate gradients.
 
 Gold strokes are conducting edges, with width mapped from conductivity.
 Animated bright points follow the signed flow direction. Gray lines retain
-explored and retired branches; small points mark the graph nodes. Food rings
+explored and retired branches; small points mark live graph nodes. Retired
+geometry is a separate, bounded drawing history (20,000 segments), so it does
+not consume the live-node budget or hydraulic solver capacity. The progress
+chart retains the last 4,096 samples without limiting simulation duration. Food rings
 brighten when reached. The sidebar reports graph size, connected tube length,
 and the shortest A-B route remaining in the current graph. Dijkstra's algorithm
 is used only to report that route length, not to guide growth or reinforcement.
@@ -64,12 +74,14 @@ routes over the shortest route between one particular food pair.
 | S / L | Save/load controls |
 
 The panel selects two or six foods, toggles graph/flow layers, and controls
-branching, nutrient bias, growing-tip and node budgets, growth duration, and tube
-adaptation. Model changes restart the simulation; visibility and playback speed
-preserve state. Settings are saved to `build/bin/data/graph-settings.xml`.
+branching, nutrient bias, live-node budget, tip limit, and tube adaptation.
+**Max growing tips** is adjustable live from **1 to 128** without resetting the
+network. Lowering it immediately removes excess frontiers; raising it permits
+additional forks and food-site restarts. Other model changes restart growth;
+visibility and playback speed preserve state. Settings are saved to `build/bin/data/graph-settings.xml`.
 
-Defaults: seed `2026`, 1,200 steps, up to 400 growth steps, 1,800 nodes, and 18
-growing tips. The `0.01` extension limit applies to each simulation step,
+Defaults: seed `2026`, continuous simulation, 1,800 live nodes, and 18 growing
+tips. Pause manually with Space. The `0.01` extension limit applies to each simulation step,
 independently of the steps-per-frame playback setting.
 
 ## Build and run
@@ -104,7 +116,9 @@ food supply roles, and verify that reinforcement moves transport to the shorter
 competing route. End-to-end checks cover node-level mass conservation, physical
 flow/conductivity consistency, local growth and junction lengths, connected
 exploration history, exact food discovery, retained food connections, branching,
-reconnection, pruning, deterministic resets, and growth/iteration budgets.
+reconnection, pruning, deterministic resets, and live-node budgets. A 5,000-step
+regression repeatedly reuses a 25-node capacity, and live tip-limit tests verify
+that changing the cap preserves the existing graph.
 
 The graph simulation uses only the C++ standard library and can be tested
 without openFrameworks or a display:

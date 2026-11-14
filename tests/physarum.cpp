@@ -55,9 +55,9 @@ void checkGrowth(bool sixFoods, unsigned seed) {
     require(simulation.getFoods().size() == (sixFoods ? 6u : 2u) && simulation.getReachedFoods() == 1,
             "Only food A is initially occupied; food B must remain a real food source");
     unsigned firstGoal = 0;
-    std::size_t peakEdges = 0;
     bool loop = false, branching = false;
-    while (simulation.step()) {
+    for (unsigned turn = 0; turn < 1200; ++turn) {
+        require(simulation.step(), "Growth must continue until explicitly paused by its caller");
         const auto& nodes = simulation.getNodes();
         const auto& edges = simulation.getEdges();
         require(nodes.size() <= settings.maxNodes && simulation.getTips().size() <= settings.maxTips,
@@ -94,21 +94,20 @@ void checkGrowth(bool sixFoods, unsigned seed) {
             branching |= degree[i] >= 3;
         }
         loop |= edges.size() >= nodes.size();
-        peakEdges = std::max(peakEdges, std::size_t(simulation.getActiveEdges()));
         if (simulation.getFoods()[1].node != Simulation::noNode && !firstGoal) firstGoal = simulation.getIteration();
         for (const auto& food : simulation.getFoods()) if (food.node != Simulation::noNode)
-            require(nodes[food.node].position == food.position && nodes[food.node].connected,
+            require(food.node < nodes.size() && nodes[food.node].position == food.position && nodes[food.node].connected,
                     "Reached foods must be actual nodes in the conducting network");
     }
     require(firstGoal >= 84, "Food B cannot be reached in fewer than 84 local growth steps");
     require(simulation.getReachedFoods() == simulation.getFoods().size(), "The seeded scene must discover all food sources");
     require(branching && loop, "The growing graph must form branch junctions and reconnecting routes");
-    require(simulation.getActiveEdges() < peakEdges, "Weak exploratory branches must be pruned during adaptation");
+    require(!simulation.getRetiredEdges().empty(), "Weak exploratory branches must retire while growth continues");
     require(std::isfinite(simulation.getConnectionLength()) && simulation.getConnectionLength() >= 0.84 - 1e-9,
             "The active graph must retain a real A-B connection");
     if (!sixFoods) require(simulation.getConnectionLength() < 0.9, "The two-food fixture must retain a short transport route");
-    // The entire historical graph, including retired branches, must remain
-    // connected to the seed. No remote skeleton is allowed to appear for free.
+    // The working graph must contain only live nodes connected to the seed.
+    // Retired geometry is stored separately and cannot consume its node budget.
     std::vector<std::vector<std::size_t>> neighbors(simulation.getNodes().size());
     for (const auto& edge : simulation.getEdges()) {
         neighbors[edge.a].push_back(edge.b); neighbors[edge.b].push_back(edge.a);
@@ -120,25 +119,95 @@ void checkGrowth(bool sixFoods, unsigned seed) {
         for (auto next : neighbors[node]) if (!visited[next]) { visited[next] = true; queue.push(next); }
     }
     require(std::all_of(visited.begin(), visited.end(), [](bool v) { return v; }), "Every historical branch must connect to the seed");
-    require(!simulation.step() && simulation.finished(), "The step limit must stop the simulation");
-    require(simulation.getHistory().size() == settings.iterations + 1 &&
+    require(simulation.getHistory().size() == 1201 &&
             std::is_sorted(simulation.getHistory().rbegin(), simulation.getHistory().rend()),
             "Best approach history must include the seed and record monotonic progress");
     std::cout << (sixFoods ? "Six" : "Two") << " foods, seed " << seed << ": reached=" << simulation.getReachedFoods()
               << ", nodes=" << simulation.getNodes().size() << ", active=" << simulation.getActiveEdges()
               << ", first B=" << firstGoal << ", A-B=" << simulation.getConnectionLength() << '\n';
     simulation.reset(settings, seed);
-    require(simulation.getNodes().size() == 1 && simulation.getEdges().empty() && simulation.getIteration() == 0,
+    require(simulation.getNodes().size() == 1 && simulation.getEdges().empty() && simulation.getRetiredEdges().empty() && simulation.getIteration() == 0,
             "Reset must clear all grown tubes and transport state");
+}
+
+void checkRecyclingAndContinuousGrowth() {
+    Simulation simulation;
+    Simulation::Settings settings;
+    settings.maxNodes = 25;
+    settings.maxTips = 1;
+    settings.sixFoods = false;
+    settings.branching = 0;
+    settings.reinforcement = 0;
+    settings.adaptation = 0.2;
+    simulation.reset(settings, 2026);
+    unsigned births = 0;
+    bool freed = false, lateGrowth = false;
+    std::size_t previousNodes = 1;
+    for (unsigned turn = 0; turn < 5000; ++turn) {
+        require(simulation.step(), "There must be no automatic growth or total-step cutoff");
+        const auto& nodes = simulation.getNodes();
+        require(nodes.size() <= settings.maxNodes, "Only current live nodes may consume the node cap");
+        freed |= nodes.size() < previousNodes;
+        previousNodes = nodes.size();
+        for (std::size_t i = 1; i < nodes.size(); ++i) if (nodes[i].born == turn) {
+            ++births;
+            lateGrowth |= turn > 1200;
+        }
+        require(simulation.getBalanceError() < 1e-5, "Reclaiming and remapping nodes must preserve hydraulic balance");
+        require(simulation.getRetiredEdges().size() <= Simulation::retiredHistoryLimit,
+                "Drawing history must remain bounded during an unlimited run");
+    }
+    require(freed && births > 10 * settings.maxNodes && lateGrowth,
+            "Dead nodes must release real capacity for repeated growth beyond the old time and node limits");
+    require(simulation.getIteration() == 5000 && simulation.getHistory().size() == Simulation::progressHistoryLimit,
+            "Progress history may roll over without stopping simulation growth");
+    for (const auto& edge : simulation.getRetiredEdges())
+        require(Simulation::distance(edge.a, edge.b) <= Simulation::maxStep + 1e-12,
+                "Archived tubes must preserve their real bounded geometry independently of remapped live nodes");
+    std::cout << "Continuous recycling: " << births << " births with a " << settings.maxNodes << "-node live cap\n";
+}
+
+void checkLiveTipLimit() {
+    Simulation simulation;
+    Simulation::Settings settings;
+    settings.maxTips = 3;
+    settings.branching = 1;
+    simulation.reset(settings, 42);
+    for (int t = 0; t < 15; ++t) simulation.step();
+    const auto before = simulation.getNodes();
+    const auto turn = simulation.getIteration();
+    simulation.setTipLimit(12);
+    require(simulation.getIteration() == turn && simulation.getNodes().size() == before.size(),
+            "Changing the tip limit must not reset the network or advance time");
+    for (std::size_t i = 0; i < before.size(); ++i)
+        require(simulation.getNodes()[i].position == before[i].position, "Changing tip capacity must preserve graph geometry");
+    bool expanded = false;
+    for (int t = 0; t < 30; ++t) {
+        simulation.step();
+        expanded |= simulation.getTips().size() > 3;
+        require(simulation.getTips().size() <= 12, "Increasing the live tip cap must still enforce its new bound");
+    }
+    require(expanded, "Raising the tip limit must permit additional forks");
+    simulation.setTipLimit(1);
+    require(simulation.getTips().size() <= 1 && simulation.getSettings().maxTips == 1,
+            "Lowering the tip limit must take effect immediately");
+    for (int t = 0; t < 20; ++t) {
+        simulation.step();
+        require(simulation.getTips().size() <= 1 && simulation.getBalanceError() < 1e-5,
+                "The reduced tip cap must persist through branching and food-site restarts");
+    }
+    bool rejected = false;
+    try { simulation.setTipLimit(0); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected && simulation.getSettings().maxTips == 1, "Invalid live tip limits must not change the current setting");
 }
 
 void checkDeterminismAndBudgets() {
     Simulation a, b;
     Simulation::Settings settings;
-    settings.maxNodes = 90; settings.iterations = 100;
+    settings.maxNodes = 90;
     a.reset(settings, 42); b.reset(settings, 42);
-    while (a.step()) {
-        require(b.step(), "Repeated simulation stopped early");
+    for (unsigned turn = 0; turn < 100; ++turn) {
+        require(a.step() && b.step(), "Simulations must not stop at a growth-step limit");
         require(a.getNodes().size() == b.getNodes().size() && a.getEdges().size() == b.getEdges().size(),
                 "A seed must reproduce graph topology");
         for (std::size_t i = 0; i < a.getNodes().size(); ++i)
@@ -159,6 +228,8 @@ void checkDeterminismAndBudgets() {
 int main() {
     try {
         checkHydraulics();
+        checkRecyclingAndContinuousGrowth();
+        checkLiveTipLimit();
         checkDeterminismAndBudgets();
         checkGrowth(false, 2026);
         checkGrowth(true, 2026);
