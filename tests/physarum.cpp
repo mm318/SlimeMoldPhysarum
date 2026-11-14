@@ -1,6 +1,7 @@
 #include "PhysarumSimulation.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <queue>
@@ -31,6 +32,7 @@ struct PhysarumSimulationTestAccess {
         s.slimes.assign(std::max(s.nodes[0].slime, s.nodes[1].slime) + 1, {});
         for (std::size_t f = 0; f < s.foods.size(); ++f) s.slimes[s.foods[f].slime].foods.push_back(f);
         for (auto& slime : s.slimes) slime.history.assign(1, 0);
+        s.spawnCredits.assign(s.slimes.size(), 0);
         s.tips = std::move(tips); s.tips.reserve(settings.maxTips * s.slimes.size());
         for (auto link : links) if (!s.addEdge(link.first, link.second))
             throw std::runtime_error("Invalid contact fixture");
@@ -48,6 +50,28 @@ struct PhysarumSimulationTestAccess {
         for (auto& edge : s.edges) if (s.nodes[edge.a].slime == slime) edge.state = S::TubeState::Established;
         s.updateExploration(); s.transport();
     }
+    struct Sample { S::SpawnOrigin origin; S::Position position; };
+    static Sample sample(S& s) {
+        S::SpawnSite site;
+        if (!s.sampleSpawnSite(0, site)) throw std::runtime_error("No eligible spawn site");
+        if (site.origin == S::SpawnOrigin::Food) return {site.origin, s.foods[site.index].position};
+        if (site.origin == S::SpawnOrigin::Frontier) return {site.origin, s.nodes[s.tips[site.index].node].position};
+        const auto& edge = s.edges[site.index];
+        const auto a = s.nodes[edge.a].position, b = s.nodes[edge.b].position;
+        return {site.origin, {a.x + (b.x - a.x) * site.fraction, a.y + (b.y - a.y) * site.fraction}};
+    }
+    static void addWaitingTip(S& s, S::Position position) {
+        for (std::size_t node = 0; node < s.nodes.size(); ++node) if (S::distance(s.nodes[node].position, position) < 1e-9) {
+            s.tips.push_back({node, 1, 0, {0, 1}, 10, 6, true, S::SpawnOrigin::Trunk});
+            return;
+        }
+        throw std::runtime_error("No node at the requested frontier position");
+    }
+    static void spawn(S& s, double rate) { s.settings.spawnRate = rate; s.spawnTips(); s.updateExploration(); s.transport(); }
+    static void launchMiddle(S& s, std::size_t edge) {
+        s.launchProbe({S::SpawnOrigin::Trunk, edge, 0.5}); s.updateExploration(); s.transport();
+    }
+    static void reseed(S& s, unsigned seed) { s.random.seed(seed); }
     static void settle(S& s, unsigned steps) {
         for (unsigned t = 0; t < steps; ++t) {
             s.adaptTubes(s.edges, s.settings, s.iteration);
@@ -151,7 +175,7 @@ void checkBackboneSettlesWhileExploring() {
     Simulation simulation;
     Simulation::Settings settings;
     settings.maxTips = 48;
-    settings.branching = 0.12;
+    settings.spawnRate = 0.12;
     PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
     double low = 10, high = 0, initial = 10, rebound = 0;
     for (unsigned turn = 0; turn < 2500; ++turn) {
@@ -180,7 +204,7 @@ void checkLongGrowthAndFusion() {
     Simulation simulation;
     Simulation::Settings settings;
     settings.maxTips = 1;
-    settings.maxNodes = 500; settings.branching = 0;
+    settings.maxNodes = 500; settings.spawnRate = 0;
     PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
     require(simulation.getFoodGroups() == 2 && simulation.getHistory().back() > 0.8,
             "Seeding food B must not count as a physical A-B connection");
@@ -190,7 +214,7 @@ void checkLongGrowthAndFusion() {
             simulation.getEdges()[0].flow == 0 && simulation.getEdges()[0].state == Simulation::TubeState::Exploring,
             "A newborn exploring branch must remain thin and alive without consuming flow");
     unsigned joined = 0;
-    bool oldBranch = false, otherFoodLaunched = false;
+    bool oldBranch = false;
     for (unsigned turn = 1; turn < 180; ++turn) {
         simulation.step();
         if (simulation.getFoodGroups() == 1 && !joined) joined = simulation.getIteration();
@@ -200,10 +224,9 @@ void checkLongGrowthAndFusion() {
                 require(edge.state == Simulation::TubeState::Exploring && edge.conductivity == 0.003 && edge.flow == 0,
                         "An unconnected frontier's entire branch must survive with zero flow regardless of age");
             }
-        for (const auto& tip : simulation.getTips()) otherFoodLaunched |= tip.food == 1;
     }
-    require(oldBranch && joined >= 84 && joined < 120 && otherFoodLaunched,
-            "Flow-free exploration must outlive 31 steps, physically connect, and rotate the single tip slot");
+    require(oldBranch && joined >= 84 && joined < 120 && !simulation.getTips().empty(),
+            "Flow-free exploration must outlive 31 steps, physically connect, and restart the single tip slot");
 }
 
 void checkContactSemantics() {
@@ -269,6 +292,88 @@ void checkSharedForkProtection() {
     PhysarumSimulationTestAccess::settle(fork, 100);
     require(fork.getNodes().size() == 5 && fork.getEdges().size() == 4 && fork.getTips().size() == 1,
             "An abandoned fork must release its node without destroying the surviving protected branch");
+}
+
+void loadStraightTrunk(Simulation& simulation, unsigned segments) {
+    std::vector<Simulation::Node> nodes{{{0.2, 0.5}}, {{0.4, 0.5}}};
+    std::vector<std::pair<std::size_t, std::size_t>> links;
+    std::size_t previous = 0;
+    for (unsigned i = 1; i < segments; ++i) {
+        const auto node = nodes.size();
+        nodes.push_back({{0.2 + 0.2 * i / segments, 0.5}});
+        links.push_back({previous, node}); previous = node;
+    }
+    links.push_back({previous, 1});
+    PhysarumSimulationTestAccess::load(simulation, std::move(nodes), links, {});
+}
+
+void checkDistributedSpawning() {
+    using Access = PhysarumSimulationTestAccess;
+    using Origin = Simulation::SpawnOrigin;
+    Simulation coarse, fine;
+    loadStraightTrunk(coarse, 20); loadStraightTrunk(fine, 40);
+    std::array<unsigned, 3> counts{};
+    constexpr unsigned samples = 12000;
+    for (unsigned sample = 0; sample < samples; ++sample) {
+        const auto a = Access::sample(coarse), b = Access::sample(fine);
+        require(a.origin == b.origin && Simulation::distance(a.position, b.position) < 1e-10,
+                "Subdividing a trunk must not change spawn probabilities or physical sampling positions");
+        ++counts[static_cast<unsigned>(a.origin)];
+    }
+    const double trunkFraction = double(counts[static_cast<unsigned>(Origin::Trunk)]) / samples;
+    require(trunkFraction > 0.89 && trunkFraction < 0.93 && counts[static_cast<unsigned>(Origin::Food)] > 0,
+            "A 0.2-long trunk must receive its physical share of births against two 0.01 food-site weights");
+
+    loadStraightTrunk(coarse, 20); loadStraightTrunk(fine, 40);
+    Access::addWaitingTip(coarse, {0.3, 0.5}); Access::addWaitingTip(fine, {0.3, 0.5});
+    counts = {};
+    for (unsigned sample = 0; sample < samples; ++sample) {
+        const auto a = Access::sample(coarse), b = Access::sample(fine);
+        require(a.origin == b.origin && Simulation::distance(a.position, b.position) < 1e-10,
+                "Tip exclusion intervals must remain independent of trunk tessellation");
+        if (a.origin == Origin::Trunk)
+            require(Simulation::distance(a.position, {0.3, 0.5}) >= Simulation::spawnSpacing - 1e-10,
+                    "Trunk births must respect the same spacing rule as food sites");
+        ++counts[static_cast<unsigned>(a.origin)];
+    }
+    require(counts[static_cast<unsigned>(Origin::Food)] > 0 && counts[static_cast<unsigned>(Origin::Frontier)] > 0 &&
+            counts[static_cast<unsigned>(Origin::Trunk)] > 0.80 * samples,
+            "Foods, frontier forks, and unblocked trunk length must share the same weighted pool");
+
+    Simulation birth;
+    loadStraightTrunk(birth, 20);
+    Access::launchMiddle(birth, 0);
+    require(birth.getNodes().size() == 22 && birth.getEdges().size() == 21 &&
+            birth.getTips().back().origin == Origin::Trunk && birth.getInjections()[birth.getTips().back().node] == 0,
+            "A sampled interior birth must split its trunk and create a flow-free tip");
+    require(std::abs(birth.getNetworkLength() - 0.2) < 1e-10 && birth.getBalanceError() < 1e-8,
+            "Splitting a trunk for a new probe must preserve its length, resistance, and mass balance");
+    for (const auto& edge : birth.getEdges()) require(std::abs(std::abs(edge.flow) - 1) < 1e-8,
+                                                     "A trunk birth must preserve real food-to-food transport");
+    Access::finishFrontiers(birth); Access::settle(birth, 1);
+    require(birth.getNodes().size() == 21 && birth.getEdges().size() == 20 && std::abs(birth.getNetworkLength() - 0.2) < 1e-10,
+            "A discarded probe's unused straight junction must release its node without moving the trunk");
+    for (const auto& edge : birth.getEdges()) require(edge.length <= Simulation::maxStep + 1e-12 && std::abs(std::abs(edge.flow) - 1) < 1e-8,
+                                                    "Reclaiming a sprout junction must preserve bounded geometry and hydraulic transport");
+
+    for (unsigned heads : {1u, 3u}) {
+        Simulation budget;
+        loadStraightTrunk(budget, 20);
+        Access::addWaitingTip(budget, {0.3, 0.5});
+        if (heads == 3) { Access::addWaitingTip(budget, {0.21, 0.5}); Access::addWaitingTip(budget, {0.39, 0.5}); }
+        for (unsigned step = 1; step <= 8; ++step) {
+            Access::spawn(budget, 0.25);
+            require(budget.getTips().size() == heads + step / 4,
+                    "A fractional shared budget must control total births independently of the number of existing tips");
+        }
+    }
+    Simulation restart;
+    loadStraightTrunk(restart, 20); Access::reseed(restart, 1); Access::spawn(restart, 0);
+    require(restart.getTips().size() == 1 && restart.getTips()[0].origin == Origin::Trunk,
+            "A slime without frontiers must restart through the shared pool, without an automatic food preference");
+    for (unsigned step = 0; step < 20; ++step) Access::spawn(restart, 0);
+    require(restart.getTips().size() == 1, "Zero spawn rate must disable extra births while a frontier remains alive");
+    std::cout << "Distributed spawning: " << trunkFraction * 100 << "% trunk sites, independent of tube subdivision\n";
 }
 
 void checkForeignContacts() {
@@ -446,9 +551,7 @@ void checkGrowth(bool sixFoods, unsigned seed) {
         continuedExploration |= simulation.getFoodGroups() == 1 && turn > 200 &&
             std::any_of(edges.begin(), edges.end(), [](const auto& edge) { return edge.state == Simulation::TubeState::Exploring; });
         for (const auto& tip : simulation.getTips())
-            lateral |= tip.age == 0 && nodes[tip.node].born + 40 < turn &&
-                       std::none_of(simulation.getFoods().begin(), simulation.getFoods().end(),
-                                    [&](const auto& food) { return food.node == tip.node; });
+            lateral |= tip.origin == Simulation::SpawnOrigin::Trunk;
     }
     if (sixFoods) {
         auto referenceNodes = simulation.getNodes();
@@ -511,7 +614,7 @@ void checkRecyclingAndContinuousGrowth() {
     Simulation::Settings settings;
     settings.maxNodes = 25;
     settings.maxTips = 1;
-    settings.branching = 0;
+    settings.spawnRate = 0;
     settings.reinforcement = 0;
     settings.adaptation = 0.2;
     PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
@@ -549,7 +652,7 @@ void checkProtectedNodeBudget() {
     Simulation simulation;
     Simulation::Settings settings;
     settings.maxNodes = 25;
-    settings.maxTips = 1; settings.branching = 0;
+    settings.maxTips = 1; settings.spawnRate = 0;
     PhysarumSimulationTestAccess::seed(simulation, settings, 2026);
     for (unsigned t = 0; t < 100; ++t) simulation.step();
     require(simulation.getNodes().size() == 25 && simulation.getTips().size() == 1,
@@ -563,7 +666,7 @@ void checkLiveTipLimit() {
     Simulation simulation;
     Simulation::Settings settings;
     settings.maxTips = 3;
-    settings.branching = 1;
+    settings.spawnRate = 1;
     PhysarumSimulationTestAccess::seed(simulation, settings, 42);
     for (int t = 0; t < 15; ++t) simulation.step();
     const auto before = simulation.getNodes();
@@ -610,7 +713,7 @@ void checkDeterminismAndBudgets() {
                     a.getEdges()[i].conductivity == b.getEdges()[i].conductivity, "A seed must reproduce tube adaptation");
     }
     require(a.getNodes().size() <= 90, "Node budget must stop additional growth");
-    settings.branching = 1.1;
+    settings.spawnRate = 4.1;
     bool rejected = false;
     try { a.reset(settings, 1); } catch (const std::invalid_argument&) { rejected = true; }
     require(rejected, "Invalid growth parameters must be rejected");
@@ -624,6 +727,7 @@ int main() {
         checkContactSemantics();
         checkForeignContacts();
         checkSharedForkProtection();
+        checkDistributedSpawning();
         checkLongGrowthAndFusion();
         checkBackboneSettlesWhileExploring();
         checkRecyclingAndContinuousGrowth();

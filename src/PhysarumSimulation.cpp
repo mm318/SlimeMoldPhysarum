@@ -59,7 +59,7 @@ PhysarumSimulation::Position PhysarumSimulation::randomDirection() {
 
 void PhysarumSimulation::reset(const Settings& s, std::uint32_t seed) {
     if (s.maxNodes < 3 * slimeCount || s.maxNodes > 10000 ||
-        s.maxTips == 0 || s.maxTips > 128 || !std::isfinite(s.branching) || s.branching < 0 || s.branching > 1 ||
+        s.maxTips == 0 || s.maxTips > 128 || !std::isfinite(s.spawnRate) || s.spawnRate < 0 || s.spawnRate > 4 ||
         !std::isfinite(s.foodBias) || s.foodBias < 0 || s.foodBias > 1 ||
         !std::isfinite(s.adaptation) || s.adaptation <= 0 || s.adaptation > 1 ||
         !std::isfinite(s.reinforcement) || s.reinforcement < 0 || s.reinforcement > 3)
@@ -89,7 +89,6 @@ void PhysarumSimulation::initializeColonies() {
     iteration = 0;
     balanceError = 0;
     nodes.clear(); parents.clear(); edges.clear(); tips.clear(); retired.clear();
-    nextFood = 0;
     slimes.clear();
     for (const auto& food : foods) slimes.resize(std::max(slimes.size(), std::size_t(food.slime + 1)));
     tips.reserve(settings.maxTips * slimes.size());
@@ -101,7 +100,7 @@ void PhysarumSimulation::initializeColonies() {
     for (unsigned fan = 0; fan < 3; ++fan)
         for (std::size_t f = 0; f < foods.size(); ++f)
             if (countTips(foods[f].slime) < settings.maxTips) launchFoodTip(f, fan);
-    nextFood = tips.size() % foods.size();
+    spawnCredits.assign(slimes.size(), 0);
     injections.assign(nodes.size(), 0);
     for (auto& slime : slimes) slime.history.assign(1, slime.foods.size() >= 2
         ? distance(foods[slime.foods[0]].position, foods[slime.foods[1]].position) : 0);
@@ -149,13 +148,123 @@ void PhysarumSimulation::launchFoodTip(std::size_t food, unsigned fan) {
     tips.push_back({node, chooseTarget(node, direction), food, direction, 0, 0, true});
 }
 
-void PhysarumSimulation::replenishTips() {
-    std::vector<unsigned> counts(foods.size());
-    for (const auto& tip : tips) ++counts[tip.food];
-    for (std::size_t i = 0; i < foods.size(); ++i) {
-        const auto food = nextFood;
-        nextFood = (nextFood + 1) % foods.size();
-        if (counts[food] == 0 && countTips(foods[food].slime) < settings.maxTips) { launchFoodTip(food); ++counts[food]; }
+bool PhysarumSimulation::sampleSpawnSite(unsigned slime, SpawnSite& site) {
+    struct Candidate { SpawnSite site; double end, weight; };
+    std::vector<Candidate> candidates;
+    const auto clear = [&](Position position, std::size_t except = noNode) {
+        for (std::size_t t = 0; t < tips.size(); ++t)
+            if (t != except && tips[t].active && nodes[tips[t].node].slime == slime &&
+                distance(position, nodes[tips[t].node].position) < spawnSpacing) return false;
+        return true;
+    };
+    for (auto f : slimes[slime].foods) if (clear(foods[f].position))
+        candidates.push_back({{SpawnOrigin::Food, f}, 0, maxStep});
+
+    // Sample the available physical length, rather than tube/node counts.
+    // Remove intervals within the same exclusion radius used for food births.
+    for (std::size_t e = 0; e < edges.size(); ++e) {
+        const auto& edge = edges[e];
+        if (!edge.active || edge.state != TubeState::Established || edge.foodLoad < 0.01 || nodes[edge.a].slime != slime) continue;
+        const auto a = nodes[edge.a].position;
+        const auto ray = subtract(nodes[edge.b].position, a);
+        const double length2 = dot(ray, ray);
+        std::vector<std::pair<double, double>> intervals{{0, 1}};
+        for (const auto& tip : tips) if (tip.active && nodes[tip.node].slime == slime) {
+            const auto offset = subtract(a, nodes[tip.node].position);
+            const double b = dot(offset, ray);
+            const double d = b * b - length2 * (dot(offset, offset) - spawnSpacing * spawnSpacing);
+            if (d <= 0) continue;
+            const double lo = std::max(0.0, (-b - std::sqrt(d)) / length2);
+            const double hi = std::min(1.0, (-b + std::sqrt(d)) / length2);
+            if (lo >= hi) continue;
+            std::vector<std::pair<double, double>> remaining;
+            for (auto interval : intervals) {
+                if (hi <= interval.first || lo >= interval.second) remaining.push_back(interval);
+                else {
+                    if (interval.first < lo) remaining.push_back({interval.first, lo});
+                    if (hi < interval.second) remaining.push_back({hi, interval.second});
+                }
+            }
+            intervals.swap(remaining);
+            if (intervals.empty()) break;
+        }
+        for (auto interval : intervals) if (interval.second - interval.first > 1e-12)
+            candidates.push_back({{SpawnOrigin::Trunk, e, interval.first}, interval.second,
+                                  edge.length * (interval.second - interval.first)});
+    }
+    for (std::size_t t = 0; t < tips.size(); ++t) {
+        const auto& tip = tips[t];
+        if (tip.active && nodes[tip.node].slime == slime && tip.sinceBranch >= 6 && clear(nodes[tip.node].position, t))
+            candidates.push_back({{SpawnOrigin::Frontier, t}, 0, maxStep});
+    }
+    double total = 0;
+    for (const auto& candidate : candidates) total += candidate.weight;
+    if (total == 0) return false;
+    double draw = uniform() * total;
+    for (const auto& candidate : candidates) {
+        if (draw < candidate.weight) {
+            site = candidate.site;
+            if (site.origin == SpawnOrigin::Trunk)
+                site.fraction += (candidate.end - site.fraction) * draw / candidate.weight;
+            return true;
+        }
+        draw -= candidate.weight;
+    }
+    return false;
+}
+
+std::size_t PhysarumSimulation::splitTube(std::size_t index, double fraction) {
+    const auto old = edges[index];
+    if (fraction * old.length < 1e-7) return old.a;
+    if ((1 - fraction) * old.length < 1e-7) return old.b;
+    const auto position = add(nodes[old.a].position, scale(subtract(nodes[old.b].position, nodes[old.a].position), fraction));
+    const auto node = addNode(position, nodes[old.a].pressure * (1 - fraction) + nodes[old.b].pressure * fraction, nodes[old.a].slime);
+    parents[node] = component(old.a);
+    edges[index].b = node; edges[index].length = distance(nodes[old.a].position, position);
+    auto tail = old; tail.a = node; tail.length = distance(position, nodes[old.b].position);
+    edges.push_back(tail);
+    return node;
+}
+
+void PhysarumSimulation::launchProbe(const SpawnSite& site) {
+    if (site.origin == SpawnOrigin::Food) { launchFoodTip(site.index); return; }
+    if (site.origin == SpawnOrigin::Frontier) {
+        auto& parent = tips[site.index];
+        const double angle = (uniform() < 0.5 ? -1 : 1) * (0.55 + 0.35 * uniform());
+        const auto direction = rotate(parent.direction, angle);
+        const auto target = chooseTarget(parent.node, direction, parent.target);
+        parent.sinceBranch = 0;
+        tips.push_back({parent.node, target, parent.food, direction, 0, 0, true, SpawnOrigin::Frontier});
+        return;
+    }
+    const auto edge = edges[site.index];
+    const auto direction = rotate(unit(subtract(nodes[edge.b].position, nodes[edge.a].position)),
+                                  (uniform() < 0.5 ? -1 : 1) * (1.35 + 0.4 * uniform()));
+    const auto before = nodes.size();
+    const auto node = splitTube(site.index, site.fraction);
+    if (nodes.size() > before) nodes[node].sproutJunction = true;
+    std::size_t food = noNode;
+    double nearest = 2;
+    for (std::size_t f = 0; f < foods.size(); ++f) if (component(foods[f].node) == component(node)) {
+        const double d = distance(nodes[node].position, foods[f].position);
+        if (d < nearest) { food = f; nearest = d; }
+    }
+    tips.push_back({node, chooseTarget(node, direction), food, direction, 0, 0, true, SpawnOrigin::Trunk});
+}
+
+void PhysarumSimulation::spawnTips() {
+    for (std::size_t offset = 0; offset < slimes.size() && nodes.size() < settings.maxNodes; ++offset) {
+        const unsigned slime = (iteration + offset) % slimes.size();
+        auto& credit = spawnCredits[slime];
+        credit = std::min(std::max(1.0, settings.spawnRate), credit + settings.spawnRate);
+        bool restart = countTips(slime) == 0;
+        while (nodes.size() < settings.maxNodes && countTips(slime) < settings.maxTips && (credit >= 1 || restart)) {
+            SpawnSite site;
+            if (!sampleSpawnSite(slime, site)) break;
+            launchProbe(site);
+            credit = std::max(0.0, credit - 1);
+            restart = false;
+        }
     }
 }
 
@@ -300,13 +409,7 @@ bool PhysarumSimulation::extend(Tip& tip) {
         else if (distance(intersection, nodes[old.b].position) < 1e-6 && distance(from, nodes[old.b].position) <= maxStep)
             destination = old.b;
         else {
-            destination = addNode(intersection, nodes[tip.node].pressure, slime);
-            parents[destination] = component(old.a);
-            edges[hit].b = destination;
-            edges[hit].length = distance(nodes[old.a].position, intersection);
-            auto tail = old;
-            tail.a = destination; tail.length = distance(intersection, nodes[old.b].position);
-            edges.push_back(tail);
+            destination = splitTube(hit, distance(nodes[old.a].position, intersection) / old.length);
         }
     }
     if (destination == noNode) {
@@ -337,38 +440,9 @@ void PhysarumSimulation::grow() {
         if (!tip.active) continue;
         if (!extend(tip)) { tip.active = false; continue; }
         ++tip.age; ++tip.sinceBranch;
-        if (tip.active && tip.sinceBranch >= 6 && countTips(nodes[tip.node].slime) < settings.maxTips && uniform() < settings.branching) {
-            const double angle = (uniform() < 0.5 ? -1 : 1) * (0.55 + 0.35 * uniform());
-            auto direction = rotate(tip.direction, angle);
-            const auto target = chooseTarget(tip.node, direction, tip.target);
-            tip.sinceBranch = 0;
-            tips.push_back({tip.node, target, tip.food, direction, 0, 0, true});
-        }
     }
     tips.erase(std::remove_if(tips.begin(), tips.end(), [](const Tip& tip) { return !tip.active; }), tips.end());
-    // Nourished trunks can launch lateral probes between existing food routes.
-    for (unsigned slime = 0; slime < slimes.size(); ++slime) if (countTips(slime) < settings.maxTips && uniform() < settings.branching) {
-        std::vector<std::size_t> candidates;
-        for (std::size_t e = 0; e < edges.size(); ++e)
-            if (nodes[edges[e].a].slime == slime && edges[e].foodLoad >= 0.01) candidates.push_back(e);
-        if (candidates.empty()) continue;
-        for (unsigned attempt = 0; attempt < 8; ++attempt) {
-            const auto& edge = edges[candidates[std::size_t(uniform() * candidates.size())]];
-            const auto node = uniform() < 0.5 ? edge.a : edge.b;
-            if (edge.foodLoad < 0.01 || iteration - nodes[node].born < 40 ||
-                std::any_of(tips.begin(), tips.end(), [&](const Tip& tip) { return distance(nodes[tip.node].position, nodes[node].position) < 0.03; })) continue;
-            std::size_t food = noNode;
-            double nearest = 2;
-            for (std::size_t f = 0; f < foods.size(); ++f) if (component(foods[f].node) == component(node)) {
-                const double d = distance(nodes[node].position, foods[f].position);
-                if (d < nearest) { food = f; nearest = d; }
-            }
-            const auto direction = rotate(unit(subtract(nodes[edge.b].position, nodes[edge.a].position)), uniform() < 0.5 ? -1.1 : 1.1);
-            tips.push_back({node, chooseTarget(node, direction), food, direction, 0, 0, true});
-            break;
-        }
-    }
-    if (nodes.size() < settings.maxNodes) replenishTips();
+    if (nodes.size() < settings.maxNodes) spawnTips();
 }
 
 void PhysarumSimulation::updateExploration() {
@@ -439,7 +513,46 @@ void PhysarumSimulation::adaptTubes(std::vector<Edge>& tubes, const Settings& se
     }
 }
 
+void PhysarumSimulation::coalesceSproutJunctions() {
+    std::vector<std::vector<std::size_t>> incident(nodes.size());
+    std::vector<bool> pinned(nodes.size());
+    for (const auto& food : foods) pinned[food.node] = true;
+    for (const auto& tip : tips) if (tip.active) pinned[tip.node] = true;
+    for (std::size_t e = 0; e < edges.size(); ++e) if (edges[e].active) {
+        incident[edges[e].a].push_back(e); incident[edges[e].b].push_back(e);
+    }
+    std::queue<std::size_t> queue;
+    for (std::size_t n = 0; n < nodes.size(); ++n) if (nodes[n].sproutJunction && !pinned[n]) queue.push(n);
+    while (!queue.empty()) {
+        const auto node = queue.front(); queue.pop();
+        std::vector<std::size_t> live;
+        for (auto e : incident[node]) if (edges[e].active && (edges[e].a == node || edges[e].b == node) &&
+            std::find(live.begin(), live.end(), e) == live.end()) live.push_back(e);
+        if (live.size() != 2) continue;
+        const auto first = edges[live[0]], second = edges[live[1]];
+        if (first.state != TubeState::Established || second.state != TubeState::Established) continue;
+        const auto a = first.a == node ? first.b : first.a;
+        const auto b = second.a == node ? second.b : second.a;
+        const double length = distance(nodes[a].position, nodes[b].position);
+        if (a == b || length > maxStep + 1e-12 || std::abs(length - first.length - second.length) > 1e-12) continue;
+        if (std::any_of(incident[a].begin(), incident[a].end(), [&](std::size_t e) {
+            return edges[e].active && ((edges[e].a == a && edges[e].b == b) || (edges[e].a == b && edges[e].b == a));
+        })) continue;
+        auto& merged = edges[live[0]];
+        merged.a = a; merged.b = b; merged.length = length;
+        merged.conductivity = length / (first.length / first.conductivity + second.length / second.conductivity);
+        merged.flow = first.b == node ? first.flow : -first.flow;
+        merged.born = std::min(first.born, second.born);
+        merged.weakSteps = std::min(first.weakSteps, second.weakSteps);
+        edges[live[1]].active = false;
+        incident[a].push_back(live[0]); incident[b].push_back(live[0]);
+        if (nodes[a].sproutJunction && !pinned[a]) queue.push(a);
+        if (nodes[b].sproutJunction && !pinned[b]) queue.push(b);
+    }
+}
+
 void PhysarumSimulation::retire() {
+    coalesceSproutJunctions();
     rebuildComponents();
     std::vector<bool> supplied(nodes.size());
     for (const auto& food : foods) supplied[component(food.node)] = true;

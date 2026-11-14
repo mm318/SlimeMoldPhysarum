@@ -25,13 +25,29 @@ The graph starts without a hidden skeleton or precomputed routes.
 
 ## Graph growth and transport
 
-The default tip budget gives each food three initial tips. Persistent tips
-extend short segments, fork, and have a modest bias toward their own slime's
-other foods. Disconnected foods take priority when selecting a target; a tip
-can finish pursuing that target after its colonies connect. Food sites
-replenish frontiers in rotation, sharing their slime's tip cap. With fewer slots
-than foods, some foods wait for a slot. Established, food-carrying trunks can
-sprout lateral probes. Growth order rotates to share the global node budget.
+The bootstrap gives each food three initial tips, subject to its slime's cap.
+After that, foods, trunk sprouts, and frontier forks share one birth budget per
+slime. There are no automatic per-food refills or independent per-tip branching
+chances. **New tips / step / slime** controls the rate, defaulting to one birth
+per step when space and eligible sites are available. Fractional rates accrue
+credit; blocked growth cannot accumulate a large future burst.
+
+Birth sites are sampled by available physical length. Each eligible food or
+frontier site contributes `0.01` units of weight; carrying trunks contribute
+their unblocked length. Subdividing a tube into more graph nodes does not
+increase its chance of spawning. All sites use a `0.03` spacing from other
+active tips of the same slime; a fork excludes its own parent from that check.
+Frontiers need six growth steps between forks. Trunks need useful food flow,
+with no additional age gate. Interior births split a tube while preserving its
+geometry, conductivity, and hydraulic resistance.
+
+A slime that loses every tip restarts one probe through the same weighted pool,
+including when the rate is zero. Zero rate otherwise disables additional
+births. An unused straight sprout junction is reclaimed after its probe dies,
+preserving the trunk and freeing node capacity. Persistent tips extend short
+segments and have a modest bias toward their own slime's foods. Disconnected
+foods take priority when selecting a target; a tip can finish pursuing its
+target after its colonies connect. Growth order rotates to share the node cap.
 
 Contacts obey ownership:
 
@@ -138,8 +154,8 @@ route.
 | Enter | Repeat the current seed |
 | S / L | Save/load controls |
 
-The panel toggles drawing layers and controls branching, nutrient bias, the
-shared live-node budget, the per-slime tip limit, and hydraulic adaptation.
+The panel toggles drawing layers and controls the shared birth rate, nutrient
+bias, live-node budget, per-slime tip limit, and hydraulic adaptation.
 **Max tips per slime** is adjustable live from **1 to 128** without resetting
 the scene. Lowering it trims each slime independently; raising it permits forks,
 lateral probes, and food-site restarts. Changing the inspected slime,
@@ -147,7 +163,8 @@ visibility, or playback speed preserves state. Other model changes restart
 growth. Settings are saved to `build/bin/data/graph-settings.xml`.
 
 Defaults: seed `2026`, ten slimes, continuous simulation, **5,000 total live
-nodes**, and **18 growing tips per slime**. Pause with Space. The `0.01`
+nodes**, **18 growing tips per slime**, and one new tip per slime per step
+when eligible sites and capacity are available. Pause with Space. The `0.01`
 extension limit applies to each simulation step, independently of playback
 speed.
 
@@ -194,6 +211,12 @@ cross-slime edges. Isolated fixtures check zero-flow exploration, shared forks,
 short-route competition, and junction geometry. A 5,000-step regression
 explicitly retires frontiers to repeatedly reuse a 25-node capacity. Seeded
 resets reproduce food placement, growth, and flow.
+
+Spawn tests compare identical trunks with different subdivisions and verify
+the same physical sampling positions, site proportions, and spacing masks.
+They check that food births, forks, and trunk sprouts spend one shared budget,
+including fractional rates and restarts without food preference. Trunk-birth
+and retirement tests verify preserved flow and reclaimed junction capacity.
 
 The graph simulation uses only the C++ standard library and can be tested
 without openFrameworks or a display:

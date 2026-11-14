@@ -29,7 +29,7 @@ void ofApp::setup() {
     controls.add(stepsPerFrame.set("Steps per frame", 1, 1, 8));
     controls.add(nodeLimit.set("Live node budget", 5000, 300, 10000));
     controls.add(tipLimit.set("Max tips per slime", 18, 1, 128));
-    controls.add(branching.set("Branching probability", 0.055f, 0.0f, 0.2f));
+    controls.add(spawnRate.set("New tips / step / slime", 1.0f, 0.0f, 4.0f));
     controls.add(foodBias.set("Food growth bias", 0.32f, 0.0f, 0.5f));
     controls.add(adaptation.set("Tube adaptation rate", 0.035f, 0.005f, 0.2f));
     controls.add(reinforcement.set("Flow reinforcement", 1.0f, 0.0f, 2.0f));
@@ -41,7 +41,7 @@ PhysarumSimulation::Settings ofApp::parameters() const {
     PhysarumSimulation::Settings s;
     const auto value = [](float x) { return std::round(double(x) * 1e6) / 1e6; };
     s.maxNodes = nodeLimit; s.maxTips = tipLimit;
-    s.branching = value(branching); s.foodBias = value(foodBias);
+    s.spawnRate = value(spawnRate); s.foodBias = value(foodBias);
     s.adaptation = value(adaptation); s.reinforcement = value(reinforcement);
     return s;
 }
@@ -56,7 +56,7 @@ void ofApp::update() {
     const auto s = parameters();
     const auto& current = simulation.getSettings();
     if (s.maxNodes != current.maxNodes ||
-        s.branching != current.branching || s.foodBias != current.foodBias ||
+        s.spawnRate != current.spawnRate || s.foodBias != current.foodBias ||
         s.adaptation != current.adaptation || s.reinforcement != current.reinforcement)
         reset();
     else if (s.maxTips != current.maxTips) simulation.setTipLimit(s.maxTips);

@@ -20,6 +20,7 @@ public:
         double pressure = 0;
         unsigned born = 0;
         unsigned slime = 0;
+        bool sproutJunction = false;
     };
     enum class TubeState { Exploring, Established, Abandoned };
     struct Edge {
@@ -36,16 +37,18 @@ public:
     struct Food { Position position; std::size_t node = noNode; unsigned slime = 0; };
     struct RetiredEdge { Position a, b; unsigned slime = 0; };
     struct Slime { std::vector<std::size_t> foods; std::deque<double> history; };
+    enum class SpawnOrigin { Food, Trunk, Frontier };
     struct Tip {
         std::size_t node = 0, target = noNode, food = 0;
         Position direction;
         unsigned age = 0, sinceBranch = 0;
         bool active = true;
+        SpawnOrigin origin = SpawnOrigin::Food;
     };
     struct Settings {
         std::size_t maxNodes = 5000;
         unsigned maxTips = 18;
-        double branching = 0.055;
+        double spawnRate = 1.0;
         double foodBias = 0.32;
         double adaptation = 0.035;
         double reinforcement = 1.0;
@@ -53,6 +56,7 @@ public:
     static constexpr unsigned slimeCount = 10;
     static constexpr double maxStep = 0.01;
     static constexpr double contactRadius = 0.0035;
+    static constexpr double spawnSpacing = 0.03;
     static constexpr unsigned pruningDelay = 24;
     static constexpr std::size_t retiredHistoryLimit = 20000;
     static constexpr std::size_t progressHistoryLimit = 4096;
@@ -96,12 +100,17 @@ private:
     std::size_t addNode(Position position, double pressure = 0, unsigned slime = 0);
     unsigned countTips(unsigned slime) const;
     void launchFoodTip(std::size_t food, unsigned fan = 1);
-    void replenishTips();
+    struct SpawnSite { SpawnOrigin origin; std::size_t index; double fraction = 0; };
+    bool sampleSpawnSite(unsigned slime, SpawnSite& site);
+    void launchProbe(const SpawnSite& site);
+    void spawnTips();
+    std::size_t splitTube(std::size_t edge, double fraction);
     std::size_t chooseTarget(std::size_t node, Position direction, std::size_t avoid = noNode) const;
     bool addEdge(std::size_t a, std::size_t b);
     void grow();
     bool extend(Tip& tip);
     void updateExploration();
+    void coalesceSproutJunctions();
     void retire();
     void transport();
     void measure();
@@ -116,6 +125,6 @@ private:
     std::vector<double> injections;
     std::deque<RetiredEdge> retired;
     unsigned iteration = 0;
-    std::size_t nextFood = 0;
+    std::vector<double> spawnCredits;
     double balanceError = 0;
 };
