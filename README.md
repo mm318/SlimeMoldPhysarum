@@ -1,52 +1,76 @@
-# Slime Mould: 2D Propagation
+# Physarum: Growing Flow Networks
 
-An openFrameworks animation of slime agents exploring an obstacle-free surface
-from `(0.08, 0.5)` toward food at `(0.92, 0.5)`.
+An openFrameworks simulation of a branching transport graph, approximating the
+behavior shown in [One Seed Builds a Living Network](https://www.youtube.com/shorts/PGH4C2rPiaM)
+by Rule & Flow. The creator describes a local-flow graph simulation; their exact
+code and growth rules are not available. This implementation is an inferred
+model, not a reproduction of their source code.
 
-## Simulation
+## Scenario
 
-Each agent has just two position coordinates, x and y, on the unit square.
-Every agent starts at the exact same point, with a seeded random heading.
-**Each movement is at most `0.01` in Euclidean distance**, including exploratory
-turns and the final movement onto the food. The limit is per simulation step,
-not per coordinate or rendered frame. Food is `0.84` units away, so reaching it
-requires at least 84 steps. Arrived agents stop at the exact food position.
+The graph begins with a single seed at food A `(0.08, 0.5)` and no edges. Food B
+is at `(0.92, 0.5)`. Both are permanent nutrient sites. The default six-food scene
+adds four sources across the unit square, as a comparison with the video.
+Disable **Video scene: six foods** to use only A and B. There are no obstacles.
 
-This is a **local-motion adaptation of SMA**, rather than the original
-unconstrained optimizer. Fitness is distance to food. SMA's fitness ranking,
-`log10` weights, best-agent/peer influence, and shrinking oscillations steer
-persistent headings. A food-distance field supplies the direction toward food,
-with stronger attraction as exploration subsides. Random restarts change
-headings instead of relocating agents. All movement is bounded before it is
-recorded. The simulation ends when all agents arrive or the step limit is met.
+Every branch extension and merging connection is at most **`0.01` units in
+Euclidean length**. New tips branch from existing nodes. Food becomes part of
+the hydraulic network only when physical growth reaches its exact position.
+The graph never begins with a hidden skeleton or a precomputed route.
 
-Green growth shows the surface the agents actually traversed. Overlapping
-tracks build brighter golden veins; light dots mark growing tips. Deposits
-are softly blurred for an organic appearance, while exploration history remains
-visible without evaporation. The optional closest-trail overlay follows one
-agent's real trajectory from the origin. There are no precomputed connections
-or trails drawn to food before agents travel there.
+## Graph growth and transport
 
-The sidebar shows arrivals, closest distance, actual trail length, and progress.
-The shortest arrival trail is the shortest among the recorded successful agents;
-movement optimizes distance to food, not total trajectory length.
-Defaults: 240 agents, 1,200 steps, direction-reset probability `0.03`, and seed `2026`.
+Persistent tips extend short segments, occasionally sprout side branches, and
+have a modest directional bias toward unreached food. A crossing splits an
+existing tube into a real junction; nearby tips can also join existing nodes.
+Growth stops at the growth-step or node budget, after which transport continues
+to adapt the network.
+
+Each tube has a length `L`, conductivity `D`, and signed flow `Q`. At every step,
+a sparse, grounded graph-Laplacian solve computes node pressures and flows:
+
+```text
+Q(a,b) = D(a,b) / L(a,b) * (pressure(a) - pressure(b))
+sum(outgoing flows at a node) = supplied flow - consumed flow
+```
+
+Growing tips draw a small exploratory flow. Discovered foods exchange transport;
+each takes a turn supplying the other foods, so neither A nor B is a permanently
+absorbing endpoint. A tube's conductivity adapts toward `reinforcement * |Q|^1.1`.
+Low-flow tubes narrow and eventually retire; useful routes retain larger
+conductivity. This feedback changes actual network transport, not just colors.
+The pressure solve uses Jacobi-preconditioned conjugate gradients.
+
+Gold strokes are conducting edges, with width mapped from conductivity.
+Animated bright points follow the signed flow direction. Gray lines retain
+explored and retired branches; small points mark the graph nodes. Food rings
+brighten when reached. The sidebar reports graph size, connected tube length,
+and the shortest A-B route remaining in the current graph. Dijkstra's algorithm
+is used only to report that route length, not to guide growth or reinforcement.
+
+Growth rules and the `1.1` reinforcement exponent are custom choices for this
+visualization. This is neither the 2020 numerical SMA optimizer nor a biological
+validation or proof of fractal scaling. Multi-food adaptation can favor shared
+routes over the shortest route between one particular food pair.
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
 | Space | Pause/resume |
-| N | Advance one simulation step and pause |
+| N | Advance one step and pause |
 | R | Restart with a new seed |
 | Enter | Repeat the current seed |
 | S / L | Save/load controls |
 
-The panel toggles exploration trails, growing tips, and the closest agent's
-trail. Changing population, step limit, or direction-reset probability restarts
-from the origin with the current seed. Steps per frame controls playback speed;
-it does not increase the `0.01` movement cap per step. Settings are saved to
-`build/bin/data/propagation-settings.xml`.
+The panel selects two or six foods, toggles graph/flow layers, and controls
+branching, nutrient bias, growing-tip and node budgets, growth duration, and tube
+adaptation. Model changes restart the simulation; visibility and playback speed
+preserve state. Settings are saved to `build/bin/data/graph-settings.xml`.
+
+Defaults: seed `2026`, 1,200 steps, up to 400 growth steps, 1,800 nodes, and 18
+growing tips. The `0.01` extension limit applies to each simulation step,
+independently of the steps-per-frame playback setting.
 
 ## Build and run
 
@@ -75,29 +99,27 @@ Build outputs stay in `build/`; the app requires no bundled assets.
 ctest --test-dir build --output-on-failure
 ```
 
-Tests verify identical starting positions, two-dimensional exploration,
-Euclidean step limits throughout every recorded trajectory, local resets,
-exact food arrivals, no arrival before step 84, deterministic seeds, bounded
-positions, consistent trail lengths, and stopping/reset behavior. Both zero
-and 100% direction-reset probabilities are exercised.
+Tests check a controlled parallel-tube network against analytic flows, reverse
+food supply roles, and verify that reinforcement moves transport to the shorter
+competing route. End-to-end checks cover node-level mass conservation, physical
+flow/conductivity consistency, local growth and junction lengths, connected
+exploration history, exact food discovery, retained food connections, branching,
+reconnection, pruning, deterministic resets, and growth/iteration budgets.
 
-The simulation uses only the C++ standard library. Its tests can also run
+The graph simulation uses only the C++ standard library and can be tested
 without openFrameworks or a display:
 
 ```bash
-c++ -std=c++17 -O2 -Isrc tests/sma.cpp src/SmaOptimizer.cpp -o /tmp/slime-tests
-/tmp/slime-tests
+c++ -std=c++17 -O2 -Isrc tests/physarum.cpp src/PhysarumSimulation.cpp -o /tmp/physarum-tests
+/tmp/physarum-tests
 ```
 
-## Sources
+## References
 
-These sources describe the same original 2020 SMA optimizer, which supplies
-the ranked weights and oscillation model adapted here:
+- [Reference video and creator description](https://www.youtube.com/shorts/PGH4C2rPiaM).
+- [Physarum Can Compute Shortest Paths](https://arxiv.org/abs/1106.0423), Bonifaci,
+  Mehlhorn, and Varma: hydraulic flow and adaptive conductance in the Tero model.
 
-- [MathWorks File Exchange](https://in.mathworks.com/matlabcentral/fileexchange/76619-slime-mould-algorithm-sma-a-method-for-optimization)
-- [Authors' page, paper, and MATLAB code](https://aliasgharheidari.com/SMA.html)
-- [Baeldung explanation](https://www.baeldung.com/cs/slime-mould-algorithm)
-
-Li, Chen, Wang, Heidari, and Mirjalili, *Slime mould algorithm: A new method for
-stochastic optimization*, Future Generation Computer Systems 111 (2020),
-300–323. [DOI: 10.1016/j.future.2020.03.055](https://doi.org/10.1016/j.future.2020.03.055).
+Classical adaptive-conductance models operate on an existing graph. The local
+growth, bifurcation, joining, exploratory demand, rotating food supply, and
+visual presentation here are additions inferred for this project.

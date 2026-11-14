@@ -1,6 +1,6 @@
 #pragma once
 
-#include "SmaOptimizer.h"
+#include "PhysarumSimulation.h"
 #include "ofMain.h"
 #include "ofxGui.h"
 
@@ -13,22 +13,15 @@ public:
 
 private:
     void reset();
-    void advance();
-    void deposit(SmaOptimizer::Position from, SmaOptimizer::Position to);
-    void updateTrailTexture();
-
+    PhysarumSimulation::Settings parameters() const;
     static constexpr int guiWidth = 280;
-    static constexpr int fieldSize = 384;
-    SmaOptimizer simulation;
+    PhysarumSimulation simulation;
     ofxPanel gui;
     ofParameterGroup controls;
-    ofParameter<int> populationSize, iterationLimit, iterationsPerFrame;
-    ofParameter<float> restartProbability;
-    ofParameter<bool> paused, showTrails, showAgents, showClosest;
-    std::vector<float> density, blur;
-    ofPixels trailPixels;
-    ofTexture trailTexture;
-    bool trailsDirty = true;
+    ofParameter<int> iterationLimit, growthSteps, nodeLimit, tipLimit, stepsPerFrame;
+    ofParameter<float> branching, foodBias, adaptation, reinforcement;
+    ofParameter<bool> paused, sixFoods, showExploration, showNodes, showTips, showFlow;
     unsigned seed = 2026;
+    double flowClock = 0;
     bool singleStep = false;
 };

@@ -1,223 +1,200 @@
 #include "ofApp.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iomanip>
 #include <sstream>
 
 void ofApp::setup() {
-    ofSetWindowTitle("Slime mould: 2D propagation");
+    ofSetWindowTitle("Physarum: growing flow network");
     ofSetFrameRate(60);
     ofEnableAlphaBlending();
     ofxBaseGui::setDefaultWidth(guiWidth - 20);
-    controls.setName("Slime propagation");
+    controls.setName("Growing transport graph");
     controls.add(paused.set("Paused [Space]", false));
-    controls.add(showTrails.set("Show exploration trails", true));
-    controls.add(showAgents.set("Show growing tips", true));
-    controls.add(showClosest.set("Highlight closest trail", false));
-    controls.add(iterationsPerFrame.set("Steps per frame", 1, 1, 8));
-    controls.add(populationSize.set("Slime agents", 240, 20, 800));
-    controls.add(iterationLimit.set("Step limit", 1200, 100, 5000));
-    controls.add(restartProbability.set("Direction reset (z)", 0.03f, 0.0f, 0.3f));
-    gui.setup(controls, "propagation-settings.xml");
-    trailPixels.allocate(fieldSize, fieldSize, OF_PIXELS_RGBA);
-    trailTexture.allocate(trailPixels);
-    trailTexture.setTextureMinMagFilter(GL_LINEAR, GL_LINEAR);
+    controls.add(sixFoods.set("Video scene: six foods", true));
+    controls.add(showExploration.set("Show explored branches", true));
+    controls.add(showNodes.set("Show graph nodes", true));
+    controls.add(showTips.set("Show growing tips", true));
+    controls.add(showFlow.set("Show transport flow", true));
+    controls.add(stepsPerFrame.set("Steps per frame", 1, 1, 8));
+    controls.add(iterationLimit.set("Step limit", 1200, 200, 3000));
+    controls.add(growthSteps.set("Growth steps", 400, 100, 1000));
+    controls.add(nodeLimit.set("Node budget", 1800, 300, 5000));
+    controls.add(tipLimit.set("Max growing tips", 18, 3, 48));
+    controls.add(branching.set("Branching probability", 0.055f, 0.0f, 0.2f));
+    controls.add(foodBias.set("Food growth bias", 0.32f, 0.0f, 0.5f));
+    controls.add(adaptation.set("Tube adaptation rate", 0.035f, 0.005f, 0.2f));
+    controls.add(reinforcement.set("Flow reinforcement", 1.0f, 0.0f, 2.0f));
+    gui.setup(controls, "graph-settings.xml");
     reset();
+}
+
+PhysarumSimulation::Settings ofApp::parameters() const {
+    PhysarumSimulation::Settings s;
+    const auto value = [](float x) { return std::round(double(x) * 1e6) / 1e6; };
+    s.iterations = iterationLimit; s.growthSteps = growthSteps;
+    s.maxNodes = nodeLimit; s.maxTips = tipLimit;
+    s.branching = value(branching); s.foodBias = value(foodBias);
+    s.adaptation = value(adaptation); s.reinforcement = value(reinforcement);
+    s.sixFoods = sixFoods;
+    return s;
 }
 
 void ofApp::reset() {
     singleStep = false;
-    SmaOptimizer::Settings settings;
-    settings.population = populationSize;
-    settings.iterations = iterationLimit;
-    settings.restartProbability = restartProbability;
-    simulation.reset(settings, seed);
-    density.assign(fieldSize * fieldSize, 0);
-    blur.resize(density.size());
-    deposit(SmaOptimizer::start, SmaOptimizer::start);
-    trailsDirty = true;
+    flowClock = 0;
+    simulation.reset(parameters(), seed);
 }
 
 void ofApp::update() {
-    const auto& settings = simulation.getSettings();
-    if (settings.population != static_cast<std::size_t>(populationSize.get()) ||
-        settings.iterations != static_cast<unsigned>(iterationLimit.get()) ||
-        settings.restartProbability != static_cast<double>(restartProbability.get())) reset();
+    const auto s = parameters();
+    const auto& current = simulation.getSettings();
+    if (s.iterations != current.iterations || s.growthSteps != current.growthSteps ||
+        s.maxNodes != current.maxNodes || s.maxTips != current.maxTips ||
+        s.branching != current.branching || s.foodBias != current.foodBias ||
+        s.adaptation != current.adaptation || s.reinforcement != current.reinforcement || s.sixFoods != current.sixFoods)
+        reset();
     if (!paused || singleStep) {
-        const int count = singleStep ? 1 : iterationsPerFrame.get();
-        for (int i = 0; i < count && !simulation.finished(); ++i) advance();
-        singleStep = false;
-    }
-    if (trailsDirty) updateTrailTexture();
-}
-
-void ofApp::advance() {
-    std::vector<SmaOptimizer::Position> previous;
-    previous.reserve(simulation.getAgents().size());
-    for (const auto& agent : simulation.getAgents()) previous.push_back(agent.position);
-    if (!simulation.step()) return;
-    for (std::size_t i = 0; i < previous.size(); ++i) {
-        const auto next = simulation.getAgents()[i].position;
-        if (!(previous[i] == next)) deposit(previous[i], next);
-    }
-    trailsDirty = true;
-}
-
-void ofApp::deposit(SmaOptimizer::Position from, SmaOptimizer::Position to) {
-    // Stamp only the segment physically travelled in this step. Density never
-    // evaporates: abandoned branches remain as an honest exploration record.
-    const int samples = std::max(1, int(std::ceil(SmaOptimizer::distance(from, to) * fieldSize * 2)));
-    for (int sample = 1; sample <= samples; ++sample) {
-        const double t = double(sample) / samples;
-        const double x = (from.x + (to.x - from.x) * t) * (fieldSize - 1);
-        const double y = (from.y + (to.y - from.y) * t) * (fieldSize - 1);
-        for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx) {
-            const int px = int(x) + dx, py = int(y) + dy;
-            if (px < 0 || py < 0 || px >= fieldSize || py >= fieldSize) continue;
-            const double squareDistance = (px - x) * (px - x) + (py - y) * (py - y);
-            auto& value = density[py * fieldSize + px];
-            value = std::min(256.0f, value + float(0.3 * std::exp(-squareDistance / 1.4)));
+        const int count = singleStep ? 1 : stepsPerFrame.get();
+        for (int i = 0; i < count; ++i) {
+            if (!simulation.step()) break;
         }
+        singleStep = false;
+        flowClock += std::min(0.1, ofGetLastFrameTime());
     }
-}
-
-void ofApp::updateTrailTexture() {
-    // A small separable blur gives the deposited trails a soft plasmodium body;
-    // the unblurred density supplies the brighter veins inside that body.
-    constexpr float kernel[] = {1, 4, 6, 4, 1};
-    for (int y = 0; y < fieldSize; ++y) for (int x = 0; x < fieldSize; ++x) {
-        float sum = 0;
-        for (int k = -2; k <= 2; ++k)
-            sum += kernel[k + 2] * density[y * fieldSize + std::clamp(x + k, 0, fieldSize - 1)];
-        blur[y * fieldSize + x] = sum / 16;
-    }
-    for (int y = 0; y < fieldSize; ++y) for (int x = 0; x < fieldSize; ++x) {
-        float sum = 0;
-        for (int k = -2; k <= 2; ++k)
-            sum += kernel[k + 2] * blur[std::clamp(y + k, 0, fieldSize - 1) * fieldSize + x];
-        const float body = 1 - std::exp(-sum / 16 * 0.22f);
-        const float vein = 1 - std::exp(-density[y * fieldSize + x] * 0.12f);
-        trailPixels.setColor(x, y, ofColor(48 + 160 * vein, 83 + 135 * vein,
-                                          22 + 56 * vein, 245 * std::sqrt(body)));
-    }
-    trailTexture.loadData(trailPixels);
-    trailsDirty = false;
 }
 
 void ofApp::keyPressed(int key) {
     if (key == 'r' || key == 'R') {
-        seed = static_cast<unsigned>(ofGetSystemTimeMicros());
-        reset();
+        seed = static_cast<unsigned>(ofGetSystemTimeMicros()); reset();
     }
     else if (key == OF_KEY_RETURN) reset();
     else if (key == ' ') paused = !paused;
     else if (key == 'n' || key == 'N') { paused = true; singleStep = true; }
-    else if (key == 's' || key == 'S') gui.saveToFile("propagation-settings.xml");
-    else if (key == 'l' || key == 'L') gui.loadFromFile("propagation-settings.xml");
+    else if (key == 's' || key == 'S') gui.saveToFile("graph-settings.xml");
+    else if (key == 'l' || key == 'L') gui.loadFromFile("graph-settings.xml");
 }
 
 void ofApp::draw() {
-    const float width = std::max(1, ofGetWidth() - guiWidth);
-    const float height = std::max(1, ofGetHeight());
-    ofPushStyle();
-    ofBackground(7, 12, 10);
-    ofSetColor(226, 233, 204);
-    ofDrawBitmapString("PHYSARUM / PROPAGATION TOWARD FOOD", 24, 28);
-    ofSetColor(132, 151, 128);
-    ofDrawBitmapString("Living tips explore in 2D. Their trails remember every step.", 24, 50);
+    const float width = std::max(1, ofGetWidth() - guiWidth), height = std::max(1, ofGetHeight());
     const float side = std::max(1.0f, std::min(width - 48, height - 132));
     const float left = (width - side) * 0.5f, top = 76;
-    auto screen = [=](SmaOptimizer::Position point) {
-        return glm::vec2(left + side * point.x, top + side * point.y);
-    };
+    auto screen = [=](PhysarumSimulation::Position p) { return glm::vec3(left + side * p.x, top + side * p.y, 0); };
+    ofPushStyle();
+    ofBackground(6, 12, 9);
+    ofSetColor(228, 234, 202);
+    ofDrawBitmapString("ONE SEED / A GROWING FLOW NETWORK", 24, 28);
+    ofSetColor(133, 153, 127);
+    ofDrawBitmapString("Branches explore. Flow reinforces useful tubes. Quiet routes fade.", 24, 50);
     ofFill();
-    ofSetColor(12, 21, 16);
+    ofSetColor(10, 21, 14);
     ofDrawRectangle(left, top, side, side);
-    ofNoFill();
-    ofSetColor(29, 42, 31);
-    ofDrawRectangle(left, top, side, side);
-    ofFill();
-    if (showTrails) {
-        ofSetColor(255);
-        trailTexture.draw(left, top, side, side);
+    const auto& nodes = simulation.getNodes();
+    const auto& edges = simulation.getEdges();
+    ofMesh explored; explored.setMode(OF_PRIMITIVE_LINES);
+    std::array<ofMesh, 9> tubes;
+    for (auto& mesh : tubes) mesh.setMode(OF_PRIMITIVE_LINES);
+    for (const auto& edge : edges) {
+        const auto a = screen(nodes[edge.a].position), b = screen(nodes[edge.b].position);
+        if (showExploration) { explored.addVertex(a); explored.addVertex(b); }
+        if (!edge.active || !nodes[edge.a].connected) continue;
+        const double thickness = std::clamp(std::sqrt(edge.conductivity / 1.1), 0.0, 1.0);
+        auto& mesh = tubes[std::min(8, int(thickness * 8))];
+        mesh.addVertex(a); mesh.addVertex(b);
     }
-    if (showClosest) {
-        ofPolyline trail;
-        for (const auto& point : simulation.getClosestAgent().history) {
-            const auto vertex = screen(point);
-            trail.addVertex(vertex.x, vertex.y);
+    ofSetLineWidth(0.7f);
+    ofSetColor(71, 96, 66, 72);
+    explored.draw();
+    if (showNodes) {
+        ofMesh points; points.setMode(OF_PRIMITIVE_POINTS);
+        for (const auto& node : nodes) points.addVertex(screen(node.position));
+        ofSetColor(130, 153, 115, 120);
+        glPointSize(1.4f); points.draw();
+    }
+    // Draw each conductance band as one mesh to keep thousands of short tubes
+    // inexpensive. Width is quantized only for drawing; physics stays continuous.
+    for (int band = 0; band <= 8; ++band) {
+        const float strength = band / 8.0f;
+        const float thickness = 0.45f + 5.0f * strength;
+        ofSetColor(222, 205, 53, 12 + 16 * strength);
+        ofSetLineWidth(thickness + 3);
+        tubes[band].draw();
+        ofSetColor(223 + 22 * strength, 205 + 30 * strength, 58 + 55 * strength, 75 + 180 * strength);
+        ofSetLineWidth(thickness);
+        tubes[band].draw();
+    }
+    if (showFlow) {
+        ofMesh flow; flow.setMode(OF_PRIMITIVE_POINTS);
+        for (std::size_t i = 0; i < edges.size(); i += 5) {
+            const auto& edge = edges[i];
+            if (!edge.active || edge.conductivity < 0.04 || std::abs(edge.flow) < 0.005) continue;
+            double phase = std::fmod(flowClock * 1.7 + i * 0.137, 1.0);
+            if (edge.flow < 0) phase = 1 - phase;
+            const auto a = screen(nodes[edge.a].position), b = screen(nodes[edge.b].position);
+            flow.addVertex(a * float(1 - phase) + b * float(phase));
         }
-        ofSetColor(232, 238, 153, 190);
-        ofSetLineWidth(1.5f);
-        trail.draw();
+        ofSetColor(246, 248, 184, 220);
+        glPointSize(2); flow.draw();
     }
-    if (showAgents) for (const auto& agent : simulation.getAgents()) {
-        if (agent.arrived) continue;
-        const auto point = screen(agent.position);
-        ofSetColor(191, 222, 93, 24);
-        ofDrawCircle(point, 4);
-        ofSetColor(224, 239, 142, 180);
-        ofDrawCircle(point, 1.2f);
+    if (showTips) {
+        ofMesh points; points.setMode(OF_PRIMITIVE_POINTS);
+        for (const auto& tip : simulation.getTips()) if (tip.active) points.addVertex(screen(nodes[tip.node].position));
+        ofSetColor(239, 242, 171);
+        glPointSize(3.2f); points.draw();
     }
-    const auto origin = screen(SmaOptimizer::start), food = screen(SmaOptimizer::goal);
-    ofSetColor(168, 197, 72, 30);
-    ofDrawCircle(origin, 13);
-    ofSetColor(193, 217, 103);
-    ofDrawCircle(origin, 5);
-    ofSetColor(216, 183, 101, 25);
-    ofDrawCircle(food, 19);
-    ofSetColor(167, 141, 80);
-    ofDrawCircle(food, 9);
-    ofSetColor(226, 211, 155);
-    ofDrawCircle(food.x - 2, food.y - 2, 6);
-    ofSetColor(172, 185, 151);
-    ofDrawBitmapString("START", origin.x - 20, origin.y - 24);
-    ofDrawBitmapString("FOOD", food.x - 16, food.y - 24);
-    ofSetColor(143, 163, 135);
-    ofDrawBitmapString("Green: explored surface   Gold: reinforced veins   Light: growing tips", 24, top + side + 25);
-    ofDrawBitmapString("All growth starts at (0.08, 0.5). Food is at (0.92, 0.5).", 24, top + side + 43);
-
-    ofSetColor(17, 25, 20);
+    glPointSize(1);
+    for (std::size_t i = 0; i < simulation.getFoods().size(); ++i) {
+        const auto& food = simulation.getFoods()[i];
+        const auto p = screen(food.position);
+        const bool reached = food.node != PhysarumSimulation::noNode;
+        ofFill(); ofSetColor(209, 185, 111, reached ? 35 : 12);
+        ofDrawCircle(p, 12);
+        ofNoFill(); ofSetLineWidth(1);
+        ofSetColor(reached ? ofColor(220, 204, 139) : ofColor(106, 112, 81));
+        ofDrawCircle(p, 7);
+        ofFill(); ofDrawCircle(p, reached ? 3 : 1.5f);
+        ofDrawBitmapString(std::string(1, char('A' + i)) + (i == 0 ? " / seed" : ""), p.x - 4, p.y - 18);
+    }
+    ofSetColor(143, 164, 131);
+    ofDrawBitmapString("Gold: conducting tubes   Gray: explored graph   Bright points: flow", 24, top + side + 25);
+    ofDrawBitmapString("Every branch grows from the existing network, at most 0.01 per step.", 24, top + side + 43);
+    ofSetColor(17, 25, 19);
     ofDrawRectangle(width, 0, guiWidth, height);
     gui.setPosition(width + 10, 10);
     gui.draw();
-    const auto& closest = simulation.getClosestAgent();
-    const bool allArrived = simulation.getArrivals() == simulation.getAgents().size();
-    const float textTop = gui.getHeight() + 32;
+    const float textTop = gui.getHeight() + 30;
+    const bool growing = simulation.getIteration() < unsigned(growthSteps.get()) && nodes.size() < std::size_t(nodeLimit.get());
+    const double path = simulation.getConnectionLength();
     std::ostringstream text;
-    text << (allArrived ? "Food reached by all agents" : simulation.finished() ? "Step limit reached" : paused ? "Paused" : "Propagating...")
+    text << (paused ? "Paused" : simulation.finished() ? "Simulation complete" : growing ? "Exploring / growing" : "Adapting transport tubes")
          << "\nStep " << simulation.getIteration() << " / " << iterationLimit
-         << "\nArrived: " << simulation.getArrivals() << " / " << populationSize
+         << "\nFoods reached: " << simulation.getReachedFoods() << " / " << simulation.getFoods().size()
+         << "\nNodes: " << nodes.size() << " / " << nodeLimit
+         << "\nActive tubes: " << simulation.getActiveEdges()
+         << "\nGrowing tips: " << simulation.getTips().size()
          << std::fixed << std::setprecision(4)
-         << "\n\nClosest distance: " << SmaOptimizer::distance(closest.position, SmaOptimizer::goal)
-         << (closest.arrived ? "\nShortest arrival trail: " : "\nClosest tip trail: ") << closest.travelled
-         << "\nStraight-line distance: 0.8400"
-         << "\n\n2 coordinates per agent"
-         << "\nMax movement / step: 0.0100"
-         << "\nDirection resets stay local"
+         << "\n\nNetwork length: " << simulation.getNetworkLength()
+         << "\nA-B route: " << (std::isfinite(path) ? ofToString(path, 4) : "not connected")
+         << "\nGrowth cap: 0.0100"
          << "\nSeed: " << seed
-         << "\n\nSpace: pause  N: one step"
+         << "\n\nSpace: pause  N: step"
          << "\nR: new seed  Enter: repeat"
          << "\nS / L: save / load controls";
-    ofSetColor(213, 222, 197);
+    ofSetColor(216, 226, 199);
     ofDrawBitmapString(text.str(), width + 12, textTop);
-
-    const float chartTop = textTop + 260, chartHeight = 95, chartWidth = guiWidth - 36;
-    if (chartTop + chartHeight + 60 < height) {
-        ofSetColor(132, 151, 128);
-        ofDrawBitmapString("Closest approach to food", width + 12, chartTop - 12);
-        ofSetColor(29, 42, 31);
-        ofDrawRectangle(width + 12, chartTop, chartWidth, chartHeight);
-        const auto& history = simulation.getHistory();
+    const float chartTop = textTop + 230, chartWidth = guiWidth - 36, chartHeight = 75;
+    if (chartTop + chartHeight + 25 < height) {
+        ofSetColor(133, 153, 127);
+        ofDrawBitmapString("Closest growth to food B", width + 12, chartTop - 12);
+        ofSetColor(29, 42, 30); ofDrawRectangle(width + 12, chartTop, chartWidth, chartHeight);
         ofPolyline curve;
+        const auto& history = simulation.getHistory();
         for (std::size_t i = 0; i < history.size(); ++i)
             curve.addVertex(width + 12 + chartWidth * i / iterationLimit.get(),
                             chartTop + chartHeight * (1 - history[i] / history.front()));
-        ofSetColor(195, 218, 105);
-        curve.draw();
-        ofSetColor(132, 151, 128);
-        ofDrawBitmapString("Local-motion SMA adaptation\nTrails show actual travel.", width + 12, chartTop + chartHeight + 22);
+        ofSetColor(222, 222, 99); ofSetLineWidth(1); curve.draw();
     }
     ofPopStyle();
 }
